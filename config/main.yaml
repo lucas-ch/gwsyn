@@ -1,0 +1,40 @@
+# Path where we save checkpoints
+default_root_dir: "./checkpoints"
+
+
+dataset:
+    # Path to the simple-shapes-dataset
+    path: "./simple_shapes_dataset"
+
+
+wandb:
+    enabled: True
+    save_dir: "./wandb"
+    project: "Shimmer-SSD"
+    entity: "lexman-psl"
+    api_key: 8761f3bd1d5f630c1b284da5ced0b1e371a4ceb1
+
+
+# Uncomment the following to use mixed-precision for training:
+# training:
+#     precision: "16-mixed"
+#     float32_matmul_precision: "medium"
+
+
+# Config for the dataloader
+domain_data_args:
+    v_latents:
+        presaved_path: domain_v.npy
+
+
+# Proportion used for each group of domain
+domain_proportions: 
+    -   domains: ["attr"]
+        proportion: 1.0
+    -   domains: ["v"]
+        proportion: 1.0
+    -   domains: ["v", "attr"]
+        proportion: 1.0
+
+
+

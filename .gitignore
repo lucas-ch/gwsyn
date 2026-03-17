@@ -1,0 +1,6 @@
+checkpoints/
+simple_shapes_dataset/
+evaluation_set_examples/
+*.zip
+*zip
+notebooks/best_model.h5
