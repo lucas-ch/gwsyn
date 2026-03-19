@@ -1,5 +1,6 @@
-checkpoints/
-simple_shapes_dataset/
+checkpoints
+simple_shapes_dataset
+simple_shapes_dataset_biased
 evaluation_set_examples/
 *.zip
 *zip

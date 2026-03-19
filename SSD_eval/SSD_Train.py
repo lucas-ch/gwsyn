@@ -3,18 +3,7 @@ from torch.utils.data import default_collate
 from shimmer_ssd.config import load_config
 import torch.nn as nn
 import wandb
-from lightning.pytorch.callbacks import LearningRateMonitor
-import numpy as np
-from torch.utils.data import Subset
-from typing import Any, Dict, List, Tuple
-from simple_shapes_dataset import SimpleShapesDataset
-import pandas as pd
-from simple_shapes_dataset import SimpleShapesDataset, get_default_domains
-from torch.utils.data import Subset # Pour sélectionner des indices spécifiques
-# from torch.utils.data import default_collate # déjà importé
-from pathlib import Path
-from torchvision.transforms import Compose # Pour combiner les transformations
-from torchvision.transforms import ToTensor # Pour utiliser ToTensor
+from lightning.pytorch.callbacks import LearningRateMonitor, EarlyStopping
 import numpy as np # déjà importé
 
 # from SSD_Train_copy import setup_logger_and_callbacks_ref
@@ -70,7 +59,6 @@ def setup_data_module(config, exclude_colors=True):
         seed=config.seed,
         domain_args=config.domain_data_args,
         collate_fn=custom_collate_factory(exclude_colors),
-        max_train_size=20000
     )
 
 
@@ -97,11 +85,11 @@ def setup_global_workspace(config, hparams, exclude_colors=True, apply_custom_in
     domains = [
         LoadedDomainConfig(
             domain_type=DomainModuleVariant.v_latents,
-            checkpoint_path= checkpoint_path / "checkpoints/domain_v.ckpt"
+            checkpoint_path= checkpoint_path / "domain_v.ckpt"
         ),
         LoadedDomainConfig(
             domain_type=DomainModuleVariant.attr_legacy_no_color if exclude_colors else DomainModuleVariant.attr_legacy,
-            checkpoint_path=checkpoint_path / "checkpoints/domain_attr.ckpt",
+            checkpoint_path=checkpoint_path / "domain_attr.ckpt",
             args=hparams,
         ),
     ]
@@ -263,7 +251,7 @@ def setup_logger_and_callbacks(config,
             mode="min",
             save_last="link",
             save_top_k=1,
-        ),
+        )
     ]
     
     return logger, callbacks, version_dir
@@ -331,8 +319,7 @@ def train_global_workspace(config, custom_hparams=None, experiment_name="debuggi
         accelerator=config.training.accelerator,
         devices=config.training.devices,
         gradient_clip_val=1.0,  # Set your desired clipping value here
-        gradient_clip_algorithm="value",
-        max_epochs=10
+        gradient_clip_algorithm="value"
     )
     
     # 5. Train and validate
@@ -349,22 +336,25 @@ torch.autograd.set_detect_anomaly(True)
 if __name__ == "__main__":
 
     config = load_config("./config", use_cli=False, load_files=["high_cycles.yaml"])
+    config.dataset.path = "./simple_shapes_dataset"
     config.seed = 0
+
     # Set up alpha and temperature
     custom_hparams = {
         "temperature": 1,
         "alpha": 10
     }
+
     config.training.max_steps = 150000
     # config.global_workspace.loss_coefficients["translations"] = 10
     # Train the model with optional custom hyperparameters
     model, checkpoint_path = train_global_workspace(
-        config, 
-        custom_hparams=custom_hparams,
-        project_name="Removing_colors",
-        experiment_name="first_test",
+        config,
+        custom_hparams=custom_hparams, 
+        project_name="control_no_bias",
+        experiment_name="first_control",
         apply_custom_init=True,
-        exclude_colors=True,
+        exclude_colors=False,
         load_from_checkpoint=False
     )
 
