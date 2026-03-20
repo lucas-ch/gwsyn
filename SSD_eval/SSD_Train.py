@@ -3,10 +3,8 @@ from torch.utils.data import default_collate
 from shimmer_ssd.config import load_config
 import torch.nn as nn
 import wandb
-from lightning.pytorch.callbacks import LearningRateMonitor, EarlyStopping
-import numpy as np # déjà importé
-
-# from SSD_Train_copy import setup_logger_and_callbacks_ref
+from lightning.pytorch.callbacks import LearningRateMonitor
+from SSD_utils import save_training_params_pickle
 
 def custom_collate_factory(exclude_colors: bool):
     """Returns a collate function that optionally removes color info."""
@@ -62,7 +60,7 @@ def setup_data_module(config, exclude_colors=True):
     )
 
 
-def setup_global_workspace(config, hparams, exclude_colors=True, apply_custom_init=True, load_from_checkpoint=True):
+def setup_global_workspace(config, hparams, exclude_colors=True, apply_custom_init=True, load_from_checkpoint=True, gw_checkpoint_path=None):
     """
     Set up the global workspace model.
     
@@ -155,10 +153,10 @@ def setup_global_workspace(config, hparams, exclude_colors=True, apply_custom_in
     )
     
     # Load from checkpoint if provided
-    if load_from_checkpoint:
-        print(f"Loading model from checkpoint: {load_from_checkpoint}")
+    if load_from_checkpoint and gw_checkpoint_path is not None:
+        print(f"Loading model from checkpoint: {gw_checkpoint_path}")
         # Load default weights
-        CHECKPOINT_PATH = "/home/alexis/Desktop/checkpoints/training_logs/Removing_colors/(Seed 2) High_translations (10) v5/checkpoints/last.ckpt"
+        CHECKPOINT_PATH = gw_checkpoint_path
         global_workspace = GlobalWorkspace2Domains.load_from_checkpoint(
         CHECKPOINT_PATH,
         domain_mods=domain_modules,
@@ -227,22 +225,6 @@ def setup_logger_and_callbacks(config,
     
     # Set up callbacks
     callbacks = [
-        LogGWImagesCallback(
-            val_samples,
-            log_key="images/val",
-            mode="val",
-            every_n_epochs=config.logging.log_val_medias_every_n_epochs,
-            filter=config.logging.filter_images,
-            exclude_colors=exclude_colors
-        ),
-        LogGWImagesCallback(
-            train_samples,
-            log_key="images/train",
-            mode="train",
-            every_n_epochs=config.logging.log_train_medias_every_n_epochs,
-            filter=config.logging.filter_images,
-            exclude_colors=exclude_colors
-        ),
         LearningRateMonitor(logging_interval='step'),
         ModelCheckpoint(
             dirpath=version_dir,
@@ -336,25 +318,43 @@ torch.autograd.set_detect_anomaly(True)
 if __name__ == "__main__":
 
     config = load_config("./config", use_cli=False, load_files=["high_cycles.yaml"])
+    
+    project_name = "control"
+    experiment_name = "biased_0"
     config.dataset.path = "./simple_shapes_dataset"
+    exclude_colors = False if project_name == "control" else True
+    
+    apply_custom_init = True
     config.seed = 0
 
     # Set up alpha and temperature
-    custom_hparams = {
-        "temperature": 1,
-        "alpha": 10
-    }
+    custom_hparams = None
+    # custom_hparams = {
+    #     "temperature": 1,
+    #     "alpha": 10
+    # }
 
     config.training.max_steps = 150000
-    # config.global_workspace.loss_coefficients["translations"] = 10
+    config.global_workspace.loss_coefficients["translations"] = 10
+
+    log_training_params = {
+        "experiment_name": experiment_name,
+        "exclude_colors": exclude_colors,
+        "apply_custom_init": apply_custom_init,
+        "config": config,
+        "custom_hparams": custom_hparams
+    }
+
+    save_training_params_pickle(log_training_params, project_name, experiment_name)
+
     # Train the model with optional custom hyperparameters
     model, checkpoint_path = train_global_workspace(
         config,
         custom_hparams=custom_hparams, 
-        project_name="control_no_bias",
-        experiment_name="first_control",
-        apply_custom_init=True,
-        exclude_colors=False,
+        project_name=project_name,
+        experiment_name=experiment_name,
+        apply_custom_init=apply_custom_init,
+        exclude_colors=exclude_colors,
         load_from_checkpoint=False
     )
 

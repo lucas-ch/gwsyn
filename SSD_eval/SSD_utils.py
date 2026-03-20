@@ -1,4 +1,6 @@
+from datetime import datetime
 import math
+from pathlib import Path
 import numpy as np
 import cv2
 import torch
@@ -2546,8 +2548,42 @@ def _process_full_cycle_path_batch(global_workspace: Any,
 
 # You would then use final_results which is the list of dictionaries.
 
+def save_training_params_pickle(config, project_name, experiment_name):
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    root_dir = Path.cwd()
+    log_dir = root_dir / "checkpoints" / "training_logs" / project_name / experiment_name
+    log_dir.mkdir(parents=True, exist_ok=True)
+    
+    file_path = log_dir / f"config_{timestamp}.pkl"
 
+    with open(file_path, 'wb') as f:
+        pickle.dump(config, f)
+    
+    return file_path
 
+def get_project_root():
+    current = Path.cwd()
+    for parent in [current] + list(current.parents):
+        if (parent / ".git").exists() or (parent / "pyproject.toml").exists():
+            return parent
+    return current
+
+def load_training_params_pickle(project_name, experiment_name, file_path=None):
+    if file_path:
+        target_path = Path(file_path)
+    else:
+        root_dir = get_project_root()
+        log_dir = root_dir / "checkpoints" / "training_logs" / project_name / experiment_name
+        
+        list_of_files = list(log_dir.glob("config_*.pkl"))
+        
+        if not list_of_files:
+            raise FileNotFoundError(f"Aucun fichier pickle trouvé dans {log_dir}")
+        
+        target_path = max(list_of_files) 
+    
+    with open(target_path, 'rb') as f:
+        return pickle.load(f)
 
 
 
