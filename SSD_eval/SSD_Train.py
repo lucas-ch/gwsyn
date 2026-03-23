@@ -233,7 +233,13 @@ def setup_logger_and_callbacks(config,
             mode="min",
             save_last="link",
             save_top_k=1,
-        )
+        ),
+        ModelCheckpoint(
+            dirpath=version_dir,
+            filename="checkpoint-epoch{epoch}",
+            every_n_epochs=100,
+            save_top_k=-1,
+        )  
     ]
     
     return logger, callbacks, version_dir
@@ -320,22 +326,21 @@ if __name__ == "__main__":
     config = load_config("./config", use_cli=False, load_files=["high_cycles.yaml"])
     
     project_name = "control"
-    experiment_name = "biased_0"
-    config.dataset.path = "./simple_shapes_dataset"
-    exclude_colors = False if project_name == "control" else True
+    experiment_name = "biased_50"
     
+    config.dataset.path = f"./simple_shapes_dataset_{experiment_name}"
+    exclude_colors = False if project_name == "control" else True
     apply_custom_init = True
     config.seed = 0
 
     # Set up alpha and temperature
-    custom_hparams = None
-    # custom_hparams = {
-    #     "temperature": 1,
-    #     "alpha": 10
-    # }
+    custom_hparams = {
+        "temperature": 1,
+        "alpha": 10
+    }
 
     config.training.max_steps = 150000
-    config.global_workspace.loss_coefficients["translations"] = 10
+    #config.global_workspace.loss_coefficients["translations"] = 10
 
     log_training_params = {
         "experiment_name": experiment_name,
