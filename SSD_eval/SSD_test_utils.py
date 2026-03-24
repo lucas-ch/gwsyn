@@ -31,7 +31,7 @@ def get_global_workspace(project_name, experiment_name, checkpoint_path=None):
     training_params = get_training_params(project_name,  experiment_name)
 
     exclude_colors = training_params["exclude_colors"]
-    gw_checkpoint_path = f"checkpoints/training_logs/{project_name}/{experiment_name}/checkpoints/last.ckpt"
+    gw_checkpoint_path = f"checkpoints/{project_name}/{experiment_name}/checkpoints/last.ckpt"
     if checkpoint_path is not None: 
         gw_checkpoint_path = checkpoint_path
 
@@ -153,11 +153,11 @@ def plot_original_translated_comparison(original_images, result_images):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 7)) 
 
     ax1.imshow(grid_train)
-    ax1.set_title("Originales")
+    ax1.set_title("Images originales")
     ax1.axis('off')
 
     ax2.imshow(grid_decoded)
-    ax2.set_title("Décodées")
+    ax2.set_title("Images traduites: attr => GW => v_latents")
     ax2.axis('off')
 
     plt.tight_layout()

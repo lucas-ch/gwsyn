@@ -195,7 +195,7 @@ def setup_logger_and_callbacks(config,
     from lightning.pytorch.callbacks import ModelCheckpoint
     from shimmer_ssd.logging import LogGWImagesCallback
     
-    output_dir = config.default_root_dir / "training_logs" / project_name / experiment_name
+    output_dir = config.default_root_dir / project_name / experiment_name
 
     # Set up logger
     logger = WandbLogger(
@@ -236,7 +236,7 @@ def setup_logger_and_callbacks(config,
         ),
         ModelCheckpoint(
             dirpath=version_dir,
-            filename="checkpoint-epoch{epoch}",
+            filename="save-{epoch}",
             every_n_epochs=100,
             save_top_k=-1,
         )  
@@ -325,18 +325,20 @@ if __name__ == "__main__":
 
     config = load_config("./config", use_cli=False, load_files=["high_cycles.yaml"])
     
-    project_name = "control"
-    experiment_name = "biased_50"
+    project_name = "syn"
+    condition = "control"
+    data = "biased_05"
+    experiment_name = f"{condition}_{data}"
     
-    config.dataset.path = f"./simple_shapes_dataset_{experiment_name}"
-    exclude_colors = False if project_name == "control" else True
+    config.dataset.path = f"./simple_shapes_dataset_{data}"
+    exclude_colors = False if condition == "control" else True
     apply_custom_init = True
     config.seed = 0
 
     # Set up alpha and temperature
     custom_hparams = {
         "temperature": 1,
-        "alpha": 10
+        "alpha": 1
     }
 
     config.training.max_steps = 150000
