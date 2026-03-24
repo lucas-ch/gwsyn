@@ -97,11 +97,26 @@ class FusionMethod(SelectionBase):
                     selection[domain] = (torch.ones(self.n_samples)*self.fusion_attr_weight).to(self.device)
             return selection
 
-def get_data_samples(data_module, n_samples, split="train"):
+def get_data_samples(data_module:SimpleShapesDataModule, n_samples:int, split="train", noise = 0.0):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     train_samples = data_module.get_samples(split, n_samples)
     train_samples = batch_to_device(train_samples, device)
+
+    if noise > 0:
+        category = train_samples[frozenset({'attr'})]["attr"][0]
+        category = category.float()
+        mean = 0.0      # Moyenne du bruit
+        std = noise     # Écart-type (plus c'est haut, plus le bruit est fort)
+
+        noise = torch.randn_like(category) * std + mean
+        category_noisy =  torch.clamp(category + noise, min=1e-8)
+
+        category_noisy_normalized = category_noisy / (category_noisy.sum(dim=-1, keepdim=True))
+
+        train_samples[frozenset({'attr'})]["attr"][0] = category_noisy_normalized
+        train_samples[frozenset({'attr', 'v_latents'})]["attr"][0] = category_noisy_normalized
+
 
     return train_samples
 

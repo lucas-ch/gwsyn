@@ -326,8 +326,8 @@ if __name__ == "__main__":
     config = load_config("./config", use_cli=False, load_files=["high_cycles.yaml"])
     
     project_name = "syn"
-    condition = "control"
-    data = "biased_05"
+    condition = "test"
+    data = "biased_00"
     experiment_name = f"{condition}_{data}"
     
     config.dataset.path = f"./simple_shapes_dataset_{data}"
@@ -335,14 +335,12 @@ if __name__ == "__main__":
     apply_custom_init = True
     config.seed = 0
 
-    # Set up alpha and temperature
     custom_hparams = {
         "temperature": 1,
         "alpha": 1
     }
 
     config.training.max_steps = 150000
-    #config.global_workspace.loss_coefficients["translations"] = 10
 
     log_training_params = {
         "experiment_name": experiment_name,
@@ -354,7 +352,6 @@ if __name__ == "__main__":
 
     save_training_params_pickle(log_training_params, project_name, experiment_name)
 
-    # Train the model with optional custom hyperparameters
     model, checkpoint_path = train_global_workspace(
         config,
         custom_hparams=custom_hparams, 

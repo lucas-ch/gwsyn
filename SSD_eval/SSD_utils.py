@@ -2551,7 +2551,7 @@ def _process_full_cycle_path_batch(global_workspace: Any,
 def save_training_params_pickle(config, project_name, experiment_name):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     root_dir = Path.cwd()
-    log_dir = root_dir / "checkpoints" / "training_logs" / project_name / experiment_name
+    log_dir = root_dir / "checkpoints" / project_name / experiment_name
     log_dir.mkdir(parents=True, exist_ok=True)
     
     file_path = log_dir / f"config_{timestamp}.pkl"
@@ -2573,7 +2573,7 @@ def load_training_params_pickle(project_name, experiment_name, file_path=None):
         target_path = Path(file_path)
     else:
         root_dir = get_project_root()
-        log_dir = root_dir / "checkpoints" / "training_logs" / project_name / experiment_name
+        log_dir = root_dir / "checkpoints" / project_name / experiment_name
         
         list_of_files = list(log_dir.glob("config_*.pkl"))
         
