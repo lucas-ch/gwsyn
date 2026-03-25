@@ -2586,6 +2586,13 @@ def load_training_params_pickle(project_name, experiment_name, file_path=None):
         return pickle.load(f)
 
 
+def get_experiment_name(condition, data, switch_epoch):
+    experiment_name = f"{condition}_{data}"
+
+    if switch_epoch > 0:
+        experiment_name = f"{experiment_name}_switch_{switch_epoch}"
+
+    return experiment_name
 
 
 

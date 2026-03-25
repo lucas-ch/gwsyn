@@ -1,10 +1,18 @@
+import os
+
+from lightning import LightningDataModule, Trainer
 import torch
 from torch.utils.data import default_collate
-from shimmer_ssd.config import load_config
+from shimmer_ssd.config import Config, load_config
 import torch.nn as nn
 import wandb
-from lightning.pytorch.callbacks import LearningRateMonitor
-from SSD_utils import save_training_params_pickle
+from lightning.pytorch.callbacks import LearningRateMonitor, Callback
+from .utils_train import save_training_params_pickle, get_experiment_name, get_project_root
+from lightning.pytorch.loggers.wandb import WandbLogger
+from lightning.pytorch.callbacks import ModelCheckpoint
+
+ROOT_PATH = get_project_root()
+REGULAR_DATASET_PATH = f"{ROOT_PATH}/simple_shapes_dataset_biased_00"
 
 def custom_collate_factory(exclude_colors: bool):
     """Returns a collate function that optionally removes color info."""
@@ -33,7 +41,7 @@ def init_weights(m: nn.Module, seed: int):
         if m.bias is not None:
             nn.init.constant_(m.bias, 0)
 
-def setup_data_module(config, exclude_colors=True):
+def setup_data_module(data_path, config:Config, exclude_colors=True):
     """
     Set up the data module for training.
     
@@ -49,7 +57,7 @@ def setup_data_module(config, exclude_colors=True):
     domain_classes = get_default_domains(["v_latents", "attr"])
     
     return SimpleShapesDataModule(
-        config.dataset.path,
+        data_path,
         domain_classes,
         config.domain_proportions,
         batch_size=config.training.batch_size,
@@ -59,6 +67,52 @@ def setup_data_module(config, exclude_colors=True):
         collate_fn=custom_collate_factory(exclude_colors),
     )
 
+class SequentialDataModule(LightningDataModule):
+    def __init__(self, data_module_1:LightningDataModule, data_module_2:LightningDataModule, switch_epoch:int):
+        super().__init__()
+        self.data_module_1 = data_module_1
+        self.data_module_2 = data_module_2
+        self.switch_epoch = switch_epoch
+
+    def setup(self, stage=None):
+        self.data_module_1.setup(stage)
+        self.data_module_2.setup(stage)
+
+    def train_dataloader(self):
+        epoch = self.trainer.current_epoch
+        if self.trainer.current_epoch < self.switch_epoch:
+            print(f"--- [DEBUG] Chargement TrainLoader PHASE 1 (Epoch {epoch}) ---")
+            return self.data_module_1.train_dataloader()
+        else:
+            print(f"--- [DEBUG] Chargement TrainLoader PHASE 2 (Epoch {epoch}) ---")
+            return self.data_module_2.train_dataloader()
+
+    def val_dataloader(self):
+        if self.trainer.current_epoch < self.switch_epoch:
+            return self.data_module_1.val_dataloader()
+        else:
+            return self.data_module_2.val_dataloader()
+
+class CustomFlexibleCheckpoint(Callback):
+    def __init__(self, dirpath):
+        super().__init__()
+        self.dirpath = dirpath
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        epoch = trainer.current_epoch + 1  # +1 car l'index commence à 0
+        
+        should_save = False
+
+        if epoch in [1, 3, 5, 10, 15, 20, 30, 40, 50, 100]:
+            should_save = True
+            
+        # 3. Après 100, toutes les 50 epochs (150, 200, etc.)
+        elif epoch > 100 and epoch % 50 == 0:
+            should_save = True
+
+        if should_save:
+            ckpt_path = f"{self.dirpath}/save-epoch={epoch}.ckpt"
+            trainer.save_checkpoint(ckpt_path)
 
 def setup_global_workspace(config, hparams, exclude_colors=True, apply_custom_init=True, load_from_checkpoint=True, gw_checkpoint_path=None):
     """
@@ -79,7 +133,7 @@ def setup_global_workspace(config, hparams, exclude_colors=True, apply_custom_in
     from torch.optim.optimizer import Optimizer
     
     # Set up domain configurations
-    checkpoint_path = Path("./checkpoints")
+    checkpoint_path = Path(f"{ROOT_PATH}/checkpoints")
     domains = [
         LoadedDomainConfig(
             domain_type=DomainModuleVariant.v_latents,
@@ -176,24 +230,18 @@ def setup_global_workspace(config, hparams, exclude_colors=True, apply_custom_in
 
 
 def setup_logger_and_callbacks(config, 
-                               data_module, 
                                experiment_name="gw_no_color", 
-                               project_name="shimmer-ssd", 
-                               exclude_colors=True):
+                               project_name="shimmer-ssd"):
     """
     Set up logging and callbacks for training.
     
     Args:
         config: Configuration with logging parameters
-        data_module: Data module to get samples from
         experiment_name: Name for the wandb experiment
         
     Returns:
         tuple: (logger, callbacks, checkpoint_dir)
     """
-    from lightning.pytorch.loggers.wandb import WandbLogger
-    from lightning.pytorch.callbacks import ModelCheckpoint
-    from shimmer_ssd.logging import LogGWImagesCallback
     
     output_dir = config.default_root_dir / project_name / experiment_name
 
@@ -205,19 +253,7 @@ def setup_logger_and_callbacks(config,
             log_model=False, # Usually handled by ModelCheckpoint
             
         )
-    
-
-    # Get samples for visualization
-    train_samples = data_module.get_samples("train", 32)
-    val_samples = data_module.get_samples("val", 32)
-    
-    
-    # Split validation samples
-    for domains in val_samples:
-        for domain in domains:
-            val_samples[frozenset([domain])] = {domain: val_samples[domains][domain]}
-        break
-    
+            
     # Create checkpoint directory
     # run_version = logger.version if logger and hasattr(logger, 'version') else 'unknown_version'
     version_dir = output_dir / "checkpoints"
@@ -234,18 +270,21 @@ def setup_logger_and_callbacks(config,
             save_last="link",
             save_top_k=1,
         ),
-        ModelCheckpoint(
-            dirpath=version_dir,
-            filename="save-{epoch}",
-            every_n_epochs=100,
-            save_top_k=-1,
-        )  
-    ]
+        CustomFlexibleCheckpoint(dirpath=version_dir)    
+        ]
     
     return logger, callbacks, version_dir
 
 
-def train_global_workspace(config, custom_hparams=None, experiment_name="debugging", project_name="shimmer-ssd_debugging", apply_custom_init=True, exclude_colors=True, load_from_checkpoint=True):
+def train_global_workspace(
+    config:Config,
+    custom_hparams=None,
+    experiment_name="debugging",
+    project_name="shimmer-ssd_debugging",
+    apply_custom_init=True,
+    exclude_colors=True,
+    load_from_checkpoint=True,
+    switch_epoch=0):
     """
     Train a global workspace model with the given configuration.
     
@@ -264,16 +303,21 @@ def train_global_workspace(config, custom_hparams=None, experiment_name="debuggi
     if custom_hparams:
         hparams.update(custom_hparams)
     
-    # 1. Set up data module
-    data_module = setup_data_module(config, exclude_colors=exclude_colors)
-    
+    data_module = None
+    if switch_epoch == 0:
+        data_module_1 = setup_data_module(REGULAR_DATASET_PATH, config, exclude_colors=exclude_colors)
+        data_module_2 = setup_data_module(REGULAR_DATASET_PATH, config, exclude_colors=exclude_colors)
+        data_module = SequentialDataModule(data_module_1, data_module_2, switch_epoch=switch_epoch)
+    if switch_epoch>0:
+        data_module_1 = setup_data_module(config.dataset.path, config, exclude_colors=exclude_colors)
+        data_module_2 = setup_data_module(REGULAR_DATASET_PATH, config, exclude_colors=exclude_colors)
+        data_module = SequentialDataModule(data_module_1, data_module_2, switch_epoch=switch_epoch)
+
     # 2. Set up global workspace
     global_workspace, _ = setup_global_workspace(config, hparams, exclude_colors=exclude_colors, apply_custom_init=apply_custom_init, load_from_checkpoint=load_from_checkpoint)
     
     # 3. Set up logger and callbacks
-    logger, callbacks, checkpoint_dir = setup_logger_and_callbacks(
-        config, data_module, experiment_name, project_name, exclude_colors=exclude_colors
-    )
+    logger, callbacks, checkpoint_dir = setup_logger_and_callbacks(config, experiment_name, project_name)
     
     # Log hyperparameters
     hparams_to_log = {
@@ -293,10 +337,11 @@ def train_global_workspace(config, custom_hparams=None, experiment_name="debuggi
         "batch_size": config.training.batch_size,
         # Other settings
         "seed": config.seed, # Log seed if set in config
-        "exclude_colors": exclude_colors # Logging the setting used for this run
+        "exclude_colors": exclude_colors, # Logging the setting used for this run
+        "switch_epoch": switch_epoch
     }
     logger.log_hyperparams(hparams_to_log)
-    
+
     # 4. Create trainer
     trainer = Trainer(
         logger=logger,
@@ -307,7 +352,8 @@ def train_global_workspace(config, custom_hparams=None, experiment_name="debuggi
         accelerator=config.training.accelerator,
         devices=config.training.devices,
         gradient_clip_val=1.0,  # Set your desired clipping value here
-        gradient_clip_algorithm="value"
+        gradient_clip_algorithm="value",
+        reload_dataloaders_every_n_epochs=1
     )
     
     # 5. Train and validate
@@ -323,14 +369,20 @@ torch.autograd.set_detect_anomaly(True)
 
 if __name__ == "__main__":
 
-    config = load_config("./config", use_cli=False, load_files=["high_cycles.yaml"])
+    config = load_config(f"{ROOT_PATH}/config", use_cli=False, load_files=["high_cycles.yaml"])
     
     project_name = "syn"
     condition = "test"
-    data = "biased_00"
+    data = "biased_80"
+    switch_epoch = 600
+
+    experiment_name = get_experiment_name(condition, data, switch_epoch)
     experiment_name = f"{condition}_{data}"
+
+    if switch_epoch > 0:
+        experiment_name = f"{experiment_name}_switch_{switch_epoch}"
     
-    config.dataset.path = f"./simple_shapes_dataset_{data}"
+    config.dataset.path = f"{ROOT_PATH}/simple_shapes_dataset_{data}"
     exclude_colors = False if condition == "control" else True
     apply_custom_init = True
     config.seed = 0
@@ -347,7 +399,8 @@ if __name__ == "__main__":
         "exclude_colors": exclude_colors,
         "apply_custom_init": apply_custom_init,
         "config": config,
-        "custom_hparams": custom_hparams
+        "custom_hparams": custom_hparams,
+        "swith_epoch": switch_epoch
     }
 
     save_training_params_pickle(log_training_params, project_name, experiment_name)
@@ -359,7 +412,6 @@ if __name__ == "__main__":
         experiment_name=experiment_name,
         apply_custom_init=apply_custom_init,
         exclude_colors=exclude_colors,
-        load_from_checkpoint=False
+        load_from_checkpoint=False,
+        switch_epoch=switch_epoch
     )
-
-

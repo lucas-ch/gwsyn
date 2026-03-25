@@ -1,3 +1,4 @@
+import os
 from typing import cast
 from collections.abc import Mapping
 
@@ -14,8 +15,8 @@ from PIL import Image
 from torch.nn.functional import one_hot
 
 from simple_shapes_dataset.cli import generate_image
-from SSD_utils import load_training_params_pickle
-from SSD_Train import setup_global_workspace, custom_collate_factory
+from .utils_train import load_training_params_pickle
+from .train import setup_global_workspace, custom_collate_factory
 
 from pathlib import Path
 import matplotlib.pyplot as plt
@@ -27,13 +28,17 @@ def get_training_params(project_name, experiment_name):
     training_params = load_training_params_pickle(project_name,  experiment_name)
     return training_params
 
-def get_global_workspace(project_name, experiment_name, checkpoint_path=None):
+def get_global_workspace(project_name, experiment_name, checkpoint_path=None, epoch=0):
+    root_path = os.path.abspath(os.path.join('..'))
+
     training_params = get_training_params(project_name,  experiment_name)
 
     exclude_colors = training_params["exclude_colors"]
-    gw_checkpoint_path = f"checkpoints/{project_name}/{experiment_name}/checkpoints/last.ckpt"
+    gw_checkpoint_path = f"{root_path}/checkpoints/{project_name}/{experiment_name}/checkpoints/last.ckpt"
     if checkpoint_path is not None: 
         gw_checkpoint_path = checkpoint_path
+    if epoch>0:
+        gw_checkpoint_path = f"{root_path}/checkpoints/{project_name}/{experiment_name}/checkpoints/save-epoch={epoch}.ckpt"
 
     config = training_params["config"]
     hparams = training_params["hparams"] if "hparams" in training_params else {"temperature": 1, "alpha": 1}
@@ -60,8 +65,10 @@ def get_data_module(project_name,  experiment_name):
 
     domain_classes = get_default_domains(["v_latents", "attr"])
 
+    root_path = os.path.abspath(os.path.join('..'))
+    data_path = f"{root_path}/{config.dataset.path}"
     data_module = SimpleShapesDataModule(
-        config.dataset.path,
+        data_path,
         domain_classes,
         config.domain_proportions,
         config.training.batch_size,

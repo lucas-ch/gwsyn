@@ -8,12 +8,8 @@
         {
             "type": "debugpy",
             "request": "launch",
-            "name": "Python: SSD_train",
+            "name": "Python: Current File",
             "program": "${file}",
-            // "program": "/home/alexis/Desktop/SSD_eval/Figures_examples_generator.py",
-            // "program": "/home/alexis/Desktop/SSD_eval/SSD_Train.py",
-            // "program": "/home/alexis/Desktop/SSD_eval/SSD_eval_regularity.py",
-            // "program": "/home/alexis/Desktop/SSD_eval/DEBUGGING_en_EVAL.py",
             "console": "integratedTerminal",
             "justMyCode": false,
         }
