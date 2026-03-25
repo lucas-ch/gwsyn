@@ -35,6 +35,7 @@ dependencies = [
     "notebook (>=7.5.4,<8.0.0)",
     "scipy (>=1.17.1,<2.0.0)",
     "shimmer-ssd @ git+https://github.com/AEmanuelli/shimmer-ssd.git",
+    "seaborn (>=0.13.2,<0.14.0)",
 ]
 
 [tool.poetry.group.dev.dependencies]

@@ -94,26 +94,32 @@ class SequentialDataModule(LightningDataModule):
             return self.data_module_2.val_dataloader()
 
 class CustomFlexibleCheckpoint(Callback):
-    def __init__(self, dirpath):
+    def __init__(self, dirpath, switch_epoch=None):
         super().__init__()
         self.dirpath = dirpath
+        self.switch_epoch = switch_epoch
 
     def on_train_epoch_end(self, trainer, pl_module):
-        epoch = trainer.current_epoch + 1  # +1 car l'index commence à 0
-        
+        epoch = trainer.current_epoch + 1
         should_save = False
 
-        if epoch in [1, 3, 5, 10, 15, 20, 30, 40, 50, 100]:
-            should_save = True
-            
-        # 3. Après 100, toutes les 50 epochs (150, 200, etc.)
-        elif epoch > 100 and epoch % 50 == 0:
-            should_save = True
+        # 1. Logique spécifique à la "fenêtre de switch"
+        if self.switch_epoch is not None and self.switch_epoch <= epoch < (self.switch_epoch + 100):
+            # Sauvegarde toutes les 10 epochs dans cette fenêtre
+            # (Ex: si switch=150, sauvegarde à 150, 160, ..., 240)
+            if (epoch - self.switch_epoch) % 10 == 0:
+                should_save = True
+
+        # 2. Logique standard (hors fenêtre de switch)
+        else:
+            if epoch in [1, 10, 20, 40, 60, 80, 100]:
+                should_save = True
+            elif epoch > 100 and epoch % 50 == 0:
+                should_save = True
 
         if should_save:
             ckpt_path = f"{self.dirpath}/save-epoch={epoch}.ckpt"
             trainer.save_checkpoint(ckpt_path)
-
 def setup_global_workspace(config, hparams, exclude_colors=True, apply_custom_init=True, load_from_checkpoint=True, gw_checkpoint_path=None):
     """
     Set up the global workspace model.
@@ -270,7 +276,7 @@ def setup_logger_and_callbacks(config,
             save_last="link",
             save_top_k=1,
         ),
-        CustomFlexibleCheckpoint(dirpath=version_dir)    
+        CustomFlexibleCheckpoint(dirpath=version_dir, switch_epoch=switch_epoch)    
         ]
     
     return logger, callbacks, version_dir
