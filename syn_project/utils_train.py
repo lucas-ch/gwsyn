@@ -257,17 +257,6 @@ def compare_color_distribution(colors, title, is_hls=False, n_samples=100, seed=
     plt.savefig(title)
     plt.show()
 
-n_samples = 100
-seed = 0
-# Generate colors
-rgb_colors, hls_colors = generate_fixed_colors_original(n_samples=n_samples)
-
-# Compare color distributions for HLS values
-compare_color_distribution(hls_colors, title='hls_distribution', is_hls=True)
-
-
-
-
 def normalize_position(pos: List[float]) -> List[float]:
     """
     Normalize position coordinates from pixel space to [-1, 1] range.
