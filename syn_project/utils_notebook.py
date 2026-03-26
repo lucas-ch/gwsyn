@@ -1,4 +1,6 @@
+from datetime import datetime
 import os
+import pickle
 from typing import cast
 from collections.abc import Mapping
 
@@ -12,24 +14,29 @@ import math
 import numpy as np
 import torch
 from PIL import Image
+from torch import nn
 from torch.nn.functional import one_hot
 
 from simple_shapes_dataset.cli import generate_image
-from .utils_train import load_training_params_pickle
-from .train import setup_global_workspace, custom_collate_factory
 
 from pathlib import Path
 import matplotlib.pyplot as plt
 from torchvision.utils import make_grid
+from torch.utils.data import default_collate
 
-
+def get_project_root():
+    current = Path.cwd()
+    for parent in [current] + list(current.parents):
+        if (parent / ".git").exists() or (parent / "pyproject.toml").exists():
+            return parent
+    return current
 
 def get_training_params(project_name, experiment_name):
     training_params = load_training_params_pickle(project_name,  experiment_name)
     return training_params
 
 def get_global_workspace(project_name, experiment_name, checkpoint_path=None, epoch=0):
-    root_path = os.path.abspath(os.path.join('..'))
+    root_path = get_project_root()
 
     training_params = get_training_params(project_name,  experiment_name)
 
@@ -65,8 +72,13 @@ def get_data_module(project_name,  experiment_name):
 
     domain_classes = get_default_domains(["v_latents", "attr"])
 
-    root_path = os.path.abspath(os.path.join('..'))
-    data_path = f"{root_path}/{config.dataset.path}"
+    root_path = get_project_root()
+
+    if str(root_path) in config.dataset.path:
+        data_path = f"{config.dataset.path}"
+    else:
+        data_path = f"{root_path}/{config.dataset.path}"
+       
     data_module = SimpleShapesDataModule(
         data_path,
         domain_classes,
@@ -127,34 +139,42 @@ def get_data_samples(data_module:SimpleShapesDataModule, n_samples:int, split="t
 
     return train_samples
 
-def get_data_translated(global_workspace, train_samples, n_samples=32, fusion_attr_weight= 1.0, show_results_fusion=False):
+import torch
+
+@torch.no_grad()
+def get_data_translated(global_workspace, train_samples, n_samples=32, fusion_attr_weight=1.0, show_results_fusion=False):
     selection_mod = FusionMethod(n_samples, fusion_attr_weight)
 
     visual_module = cast(VisualLatentDomainModule, global_workspace.domain_mods["v_latents"])
     train_paired_samples = train_samples[frozenset(["v_latents", "attr"])]
 
-    train_images = visual_module.decode_images(train_paired_samples["v_latents"])
-    train_attr = torch.cat((train_paired_samples["attr"][0], train_paired_samples["attr"][1]), dim=1)
+    train_images = visual_module.decode_images(train_paired_samples["v_latents"]).detach().cpu()
+    
+    train_attr = torch.cat((train_paired_samples["attr"][0], train_paired_samples["attr"][1]), dim=1).detach().cpu()
 
     unimodal_latents = global_workspace.encode_domains(train_samples)
     gw_latents = global_workspace.encode(unimodal_latents)
-    gw_latents_fusion = global_workspace.encode_and_fuse(unimodal_latents, selection_mod)
 
-    gw_latents_decoded = global_workspace.decode(gw_latents[frozenset({'attr'})], ["v_latents", "attr"])
-    gw_latents_fusion_decoded = global_workspace.decode(gw_latents_fusion, ["v_latents", "attr"])
+    gw_latents_decoded = global_workspace.decode(gw_latents[frozenset({'v_latents', 'attr'})], ["v_latents", "attr"])
 
+    # Extraction et nettoyage
     attr_decoded = gw_latents_decoded["attr"]["attr"]
-    images_decoded = visual_module.decode_images(gw_latents_decoded['attr']['v_latents'])
+    images_decoded = visual_module.decode_images(gw_latents_decoded['attr']['v_latents']).detach().cpu()
 
-    attr_fusion_decoded = gw_latents_fusion_decoded[frozenset({'v_latents', 'attr'})]['attr']
-    images_fusion_decoded = visual_module.decode_images(gw_latents_fusion_decoded[frozenset({'v_latents', 'attr'})]['v_latents'])
-
-    result_attr = attr_decoded
-    result_images = images_decoded
 
     if show_results_fusion:
+        gw_latents_fusion = global_workspace.encode_and_fuse(unimodal_latents, selection_mod)
+        gw_latents_fusion_decoded = global_workspace.decode(gw_latents_fusion, ["v_latents", "attr"])
+        attr_fusion_decoded = gw_latents_fusion_decoded[frozenset({'v_latents', 'attr'})]['attr']
+        images_fusion_decoded = visual_module.decode_images(gw_latents_fusion_decoded[frozenset({'v_latents', 'attr'})]['v_latents']).detach().cpu()
+
         result_attr = attr_fusion_decoded
         result_images = images_fusion_decoded
+    else:
+        result_attr = attr_decoded
+        result_images = images_decoded
+
+    torch.cuda.empty_cache()
 
     return {
         "train_images": train_images,
@@ -163,14 +183,17 @@ def get_data_translated(global_workspace, train_samples, n_samples=32, fusion_at
         "attr_decoded": result_attr
     }
 
-
 def get_grid_numpy(samples, nrow=8):
     grid = make_grid(samples, nrow=nrow, pad_value=1).permute(1, 2, 0)
     return grid.detach().cpu().numpy()
 
-def plot_original_translated_comparison(original_images, result_images):
-    grid_train = get_grid_numpy(original_images)
-    grid_decoded = get_grid_numpy(result_images)
+def plot_original_translated_comparison(original_images, result_images, max_images=32):
+    num_to_show = min(len(original_images), max_images)
+    orig_subset = original_images[:num_to_show]
+    res_subset = result_images[:num_to_show]    
+    
+    grid_train = get_grid_numpy(orig_subset)
+    grid_decoded = get_grid_numpy(res_subset)
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 7)) 
 
@@ -183,7 +206,7 @@ def plot_original_translated_comparison(original_images, result_images):
     ax2.axis('off')
 
     plt.tight_layout()
-    plt.show()
+    return fig
 
 
 CAT2IDX = {"Diamond": 0, "Egg": 1, "Triangle": 2}
@@ -259,3 +282,186 @@ def plot_interactive(image, decoded_image):
     axes[1].set_yticks([])
     axes[1].set_title("Translated image through GW")
     plt.show()
+
+
+def init_weights(m: nn.Module, seed: int):
+    """Applies Kaiming Normal initialization to Linear layers."""
+    if isinstance(m, nn.Linear):
+        # Infer device from the weight tensor itself
+        device = m.weight.device
+        nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu',
+                                generator=torch.Generator(device=device).manual_seed(seed))
+        if m.bias is not None:
+            nn.init.constant_(m.bias, 0)
+
+def save_training_params_pickle(config, project_name, experiment_name):
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    root_dir = Path.cwd()
+    log_dir = root_dir / "checkpoints" / project_name / experiment_name
+    log_dir.mkdir(parents=True, exist_ok=True)
+    
+    file_path = log_dir / f"config_{timestamp}.pkl"
+
+    with open(file_path, 'wb') as f:
+        pickle.dump(config, f)
+    
+    return file_path
+
+def load_training_params_pickle(project_name, experiment_name, file_path=None):
+    if file_path:
+        target_path = Path(file_path)
+    else:
+        root_dir = get_project_root()
+        log_dir = root_dir / "checkpoints" / project_name / experiment_name
+        
+        list_of_files = list(log_dir.glob("config_*.pkl"))
+        
+        if not list_of_files:
+            raise FileNotFoundError(f"Aucun fichier pickle trouvé dans {log_dir}")
+        
+        target_path = max(list_of_files) 
+    
+    with open(target_path, 'rb') as f:
+        return pickle.load(f)
+
+
+def get_experiment_name(condition, data, switch_epoch):
+    experiment_name = f"{condition}_{data}"
+
+    if switch_epoch > 0:
+        experiment_name = f"{experiment_name}_switch_{switch_epoch}"
+
+    return experiment_name
+
+def custom_collate_factory(exclude_colors: bool):
+    """Returns a collate function that optionally removes color info."""
+    if not exclude_colors:
+        return default_collate
+
+    def custom_collate(batch):
+        """Collate function that removes the last 3 attrs (assumed colors)."""
+        result = default_collate(batch)
+        # Check if we need to modify the second tensor in attr list
+        if (isinstance(result, dict) and "attr" in result and
+            isinstance(result["attr"], list) and len(result["attr"]) >= 2 and
+            isinstance(result["attr"][1], torch.Tensor) and result["attr"][1].size(-1) >= 4):
+            # Remove the last 3 values from the tensor
+            result["attr"][1] = result["attr"][1][..., :-3]
+        return result
+    return custom_collate
+
+def setup_global_workspace(config, hparams, exclude_colors=True, apply_custom_init=True, load_from_checkpoint=True, gw_checkpoint_path=None):
+    """
+    Set up the global workspace model.
+    
+    Args:
+        config: Configuration with model parameters
+        hparams: Hyperparameters dictionary
+        
+    Returns:
+        tuple: (global_workspace, domain_modules)
+    """
+    from pathlib import Path
+    from shimmer_ssd.config import LoadedDomainConfig, DomainModuleVariant
+    from shimmer_ssd.modules.domains import load_pretrained_domains
+    from shimmer.modules.global_workspace import GlobalWorkspace2Domains
+    from torch.optim.lr_scheduler import OneCycleLR
+    from torch.optim.optimizer import Optimizer
+    
+    root_path = get_project_root()
+    # Set up domain configurations
+    checkpoint_path = Path(f"{root_path}/checkpoints")
+    domains = [
+        LoadedDomainConfig(
+            domain_type=DomainModuleVariant.v_latents,
+            checkpoint_path= checkpoint_path / "domain_v.ckpt"
+        ),
+        LoadedDomainConfig(
+            domain_type=DomainModuleVariant.attr_legacy_no_color if exclude_colors else DomainModuleVariant.attr_legacy,
+            checkpoint_path=checkpoint_path / "domain_attr.ckpt",
+            args=hparams,
+        ),
+    ]
+    
+    # Create scheduler function
+    def get_scheduler(optimizer: Optimizer, scheduler_type: str = "onecycle"):
+        if scheduler_type == "onecycle":
+            return OneCycleLR(optimizer, config.training.optim.max_lr, 
+                          int(config.training.max_steps), 
+                          pct_start=config.training.optim.pct_start, div_factor=.38, final_div_factor=5)
+        elif scheduler_type == "linear":
+            from torch.optim.lr_scheduler import LinearLR
+            return LinearLR(
+                optimizer,
+                start_factor=1.0,
+                end_factor=0.1,
+                total_iters=config.training.max_steps
+                )
+        elif scheduler_type == "cosine":
+            from torch.optim.lr_scheduler import CosineAnnealingLR
+            return CosineAnnealingLR(
+                optimizer,
+                T_max=config.training.max_steps,
+                eta_min=config.training.optim.lr / 100
+            )
+        else:
+            print(f"Scheduler type {scheduler_type} not supported")
+            return None
+    # Load domains and create GW
+    domain_modules, gw_encoders, gw_decoders = load_pretrained_domains(
+        domains,
+        config.global_workspace.latent_dim,
+        config.global_workspace.encoders.hidden_dim,
+        config.global_workspace.encoders.n_layers,
+        config.global_workspace.decoders.hidden_dim,
+        config.global_workspace.decoders.n_layers,
+    )
+    
+    # Adjust learning rate based on loss coefficients
+    # lr = config.training.optim.lr * 3.1 / sum(config.global_workspace.loss_coefficients.values()) #### TODO: check if this is correct
+    lr = config.training.optim.lr
+    # Create global workspace
+    
+
+    if apply_custom_init:
+        # Only apply initialization to GW encoders and decoders, not to the pretrained visual module
+        for modality in gw_encoders:
+            encoder = gw_encoders[modality]
+            encoder.apply(lambda m: init_weights(m, config.seed))
+        for modality in gw_decoders:
+            decoder = gw_decoders[modality]
+            decoder.apply(lambda m: init_weights(m, config.seed))
+
+    global_workspace = GlobalWorkspace2Domains(
+        domain_modules,
+        gw_encoders,
+        gw_decoders,
+        config.global_workspace.latent_dim,
+        config.global_workspace.loss_coefficients,
+        lr,
+        config.training.optim.weight_decay,
+        scheduler=get_scheduler,
+    )
+    
+    # Load from checkpoint if provided
+    if load_from_checkpoint and gw_checkpoint_path is not None:
+        print(f"Loading model from checkpoint: {gw_checkpoint_path}")
+        # Load default weights
+        CHECKPOINT_PATH = gw_checkpoint_path
+        global_workspace = GlobalWorkspace2Domains.load_from_checkpoint(
+        CHECKPOINT_PATH,
+        domain_mods=domain_modules,
+        gw_encoders=gw_encoders,
+        gw_decoders=gw_decoders,
+    )
+        # Reset the optimizer and scheduler
+        global_workspace.optimizer = None
+        global_workspace.scheduler = None
+        # Reset the callbacks
+        global_workspace.callbacks = None
+        
+        # Reset the training state
+        print(f"Loaded default weights from {CHECKPOINT_PATH}")
+    
+    return global_workspace, domain_modules
+

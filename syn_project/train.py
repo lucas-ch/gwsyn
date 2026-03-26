@@ -2,44 +2,18 @@ import os
 
 from lightning import LightningDataModule, Trainer
 import torch
-from torch.utils.data import default_collate
 from shimmer_ssd.config import Config, load_config
 import torch.nn as nn
 import wandb
 from lightning.pytorch.callbacks import LearningRateMonitor, Callback
-from .utils_train import save_training_params_pickle, get_experiment_name, get_project_root
+from .utils_notebook import *
+from .utils_analyse import *
 from lightning.pytorch.loggers.wandb import WandbLogger
 from lightning.pytorch.callbacks import ModelCheckpoint
 
 ROOT_PATH = get_project_root()
 REGULAR_DATASET_PATH = f"{ROOT_PATH}/simple_shapes_dataset_biased_00"
 
-def custom_collate_factory(exclude_colors: bool):
-    """Returns a collate function that optionally removes color info."""
-    if not exclude_colors:
-        return default_collate
-
-    def custom_collate(batch):
-        """Collate function that removes the last 3 attrs (assumed colors)."""
-        result = default_collate(batch)
-        # Check if we need to modify the second tensor in attr list
-        if (isinstance(result, dict) and "attr" in result and
-            isinstance(result["attr"], list) and len(result["attr"]) >= 2 and
-            isinstance(result["attr"][1], torch.Tensor) and result["attr"][1].size(-1) >= 4):
-            # Remove the last 3 values from the tensor
-            result["attr"][1] = result["attr"][1][..., :-3]
-        return result
-    return custom_collate
-
-def init_weights(m: nn.Module, seed: int):
-    """Applies Kaiming Normal initialization to Linear layers."""
-    if isinstance(m, nn.Linear):
-        # Infer device from the weight tensor itself
-        device = m.weight.device
-        nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu',
-                                generator=torch.Generator(device=device).manual_seed(seed))
-        if m.bias is not None:
-            nn.init.constant_(m.bias, 0)
 
 def setup_data_module(data_path, config:Config, exclude_colors=True):
     """
@@ -94,23 +68,20 @@ class SequentialDataModule(LightningDataModule):
             return self.data_module_2.val_dataloader()
 
 class CustomFlexibleCheckpoint(Callback):
-    def __init__(self, dirpath, switch_epoch=None):
+    def __init__(self, project_name, experiment_name, dirpath, switch_epoch=None):
         super().__init__()
+        self.project_name = project_name
+        self.experiment_name = experiment_name
         self.dirpath = dirpath
         self.switch_epoch = switch_epoch
 
-    def on_train_epoch_end(self, trainer, pl_module):
+    def save_checkpoint(self, trainer:Trainer):
         epoch = trainer.current_epoch + 1
         should_save = False
 
-        # 1. Logique spécifique à la "fenêtre de switch"
         if self.switch_epoch is not None and self.switch_epoch <= epoch < (self.switch_epoch + 100):
-            # Sauvegarde toutes les 10 epochs dans cette fenêtre
-            # (Ex: si switch=150, sauvegarde à 150, 160, ..., 240)
             if (epoch - self.switch_epoch) % 10 == 0:
                 should_save = True
-
-        # 2. Logique standard (hors fenêtre de switch)
         else:
             if epoch in [1, 10, 20, 40, 60, 80, 100]:
                 should_save = True
@@ -120,119 +91,76 @@ class CustomFlexibleCheckpoint(Callback):
         if should_save:
             ckpt_path = f"{self.dirpath}/save-epoch={epoch}.ckpt"
             trainer.save_checkpoint(ckpt_path)
-def setup_global_workspace(config, hparams, exclude_colors=True, apply_custom_init=True, load_from_checkpoint=True, gw_checkpoint_path=None):
-    """
-    Set up the global workspace model.
-    
-    Args:
-        config: Configuration with model parameters
-        hparams: Hyperparameters dictionary
-        
-    Returns:
-        tuple: (global_workspace, domain_modules)
-    """
-    from pathlib import Path
-    from shimmer_ssd.config import LoadedDomainConfig, DomainModuleVariant
-    from shimmer_ssd.modules.domains import load_pretrained_domains
-    from shimmer.modules.global_workspace import GlobalWorkspace2Domains
-    from torch.optim.lr_scheduler import OneCycleLR
-    from torch.optim.optimizer import Optimizer
-    
-    # Set up domain configurations
-    checkpoint_path = Path(f"{ROOT_PATH}/checkpoints")
-    domains = [
-        LoadedDomainConfig(
-            domain_type=DomainModuleVariant.v_latents,
-            checkpoint_path= checkpoint_path / "domain_v.ckpt"
-        ),
-        LoadedDomainConfig(
-            domain_type=DomainModuleVariant.attr_legacy_no_color if exclude_colors else DomainModuleVariant.attr_legacy,
-            checkpoint_path=checkpoint_path / "domain_attr.ckpt",
-            args=hparams,
-        ),
-    ]
-    
-    # Create scheduler function
-    def get_scheduler(optimizer: Optimizer, scheduler_type: str = "onecycle"):
-        if scheduler_type == "onecycle":
-            return OneCycleLR(optimizer, config.training.optim.max_lr, 
-                          int(config.training.max_steps), 
-                          pct_start=config.training.optim.pct_start, div_factor=.38, final_div_factor=5)
-        elif scheduler_type == "linear":
-            from torch.optim.lr_scheduler import LinearLR
-            return LinearLR(
-                optimizer,
-                start_factor=1.0,
-                end_factor=0.1,
-                total_iters=config.training.max_steps
-                )
-        elif scheduler_type == "cosine":
-            from torch.optim.lr_scheduler import CosineAnnealingLR
-            return CosineAnnealingLR(
-                optimizer,
-                T_max=config.training.max_steps,
-                eta_min=config.training.optim.lr / 100
+
+    def run_color_analysis(self, trainer:Trainer, pl_module):
+        pl_module.eval()
+        with torch.no_grad():
+            n_samples = 1000
+            data_module = get_data_module(self.project_name,  self.experiment_name)
+            test_samples = get_data_samples(data_module, n_samples, split= "test")
+            data_translated = get_data_translated(pl_module, test_samples, n_samples)            
+            
+            masks = get_mask_from_shape_batch(data_translated["train_images"])
+            masks_decoded = get_mask_from_shape_batch(data_translated["images_decoded"])
+
+            colors_from_data_attr = get_color_from_attr_batch(data_translated['train_attr']).detach().cpu().numpy()
+            colors_from_data_img = get_color_from_img_batch(data_translated["train_images"], masks)
+            colors_from_decoded_img = get_color_from_img_batch(data_translated["images_decoded"], masks_decoded)
+
+            categories_from_data_attr = data_translated['train_attr'][:, 0:3].detach().cpu().numpy()
+
+            categories_from_decoded_attr = categorize_decoded_attr(data_translated["attr_decoded"])
+            categories_indices = categories_from_decoded_attr.argmax(dim=1).detach().cpu().numpy()
+
+            save_path = os.path.join(self.dirpath, f"stats_epoch_{trainer.current_epoch:03d}.npz")
+
+            np.savez_compressed(
+                save_path,
+                colors_from_data_attr=colors_from_data_attr,
+                colors_from_data_img=colors_from_data_img,
+                colors_from_decoded_img=colors_from_decoded_img,
+                categories_from_data_attr=categories_from_data_attr,
+                categories_from_decoded_attr=categories_from_decoded_attr.detach().cpu().numpy()
             )
-        else:
-            print(f"Scheduler type {scheduler_type} not supported")
-            return None
-    # Load domains and create GW
-    domain_modules, gw_encoders, gw_decoders = load_pretrained_domains(
-        domains,
-        config.global_workspace.latent_dim,
-        config.global_workspace.encoders.hidden_dim,
-        config.global_workspace.encoders.n_layers,
-        config.global_workspace.decoders.hidden_dim,
-        config.global_workspace.decoders.n_layers,
-    )
-    
-    # Adjust learning rate based on loss coefficients
-    # lr = config.training.optim.lr * 3.1 / sum(config.global_workspace.loss_coefficients.values()) #### TODO: check if this is correct
-    lr = config.training.optim.lr
-    # Create global workspace
-    
-
-    if apply_custom_init:
-        # Only apply initialization to GW encoders and decoders, not to the pretrained visual module
-        for modality in gw_encoders:
-            encoder = gw_encoders[modality]
-            encoder.apply(lambda m: init_weights(m, config.seed))
-        for modality in gw_decoders:
-            decoder = gw_decoders[modality]
-            decoder.apply(lambda m: init_weights(m, config.seed))
-
-    global_workspace = GlobalWorkspace2Domains(
-        domain_modules,
-        gw_encoders,
-        gw_decoders,
-        config.global_workspace.latent_dim,
-        config.global_workspace.loss_coefficients,
-        lr,
-        config.training.optim.weight_decay,
-        scheduler=get_scheduler,
-    )
-    
-    # Load from checkpoint if provided
-    if load_from_checkpoint and gw_checkpoint_path is not None:
-        print(f"Loading model from checkpoint: {gw_checkpoint_path}")
-        # Load default weights
-        CHECKPOINT_PATH = gw_checkpoint_path
-        global_workspace = GlobalWorkspace2Domains.load_from_checkpoint(
-        CHECKPOINT_PATH,
-        domain_mods=domain_modules,
-        gw_encoders=gw_encoders,
-        gw_decoders=gw_decoders,
-    )
-        # Reset the optimizer and scheduler
-        global_workspace.optimizer = None
-        global_workspace.scheduler = None
-        # Reset the callbacks
-        global_workspace.callbacks = None
         
-        # Reset the training state
-        print(f"Loaded default weights from {CHECKPOINT_PATH}")
-    
-    return global_workspace, domain_modules
+            fig = plot_original_translated_comparison(data_translated["train_images"], data_translated["images_decoded"])
+            output_dir = os.path.join(self.dirpath, "visual_logs")
+            os.makedirs(output_dir, exist_ok=True)
+
+            file_name = f"fig_comparison_epoch_{trainer.current_epoch:03d}.png"
+            save_path = os.path.join(output_dir, file_name)
+            fig.savefig(save_path, dpi=150, bbox_inches='tight')
+
+            trainer.logger.experiment.log({
+                "visuals/comparison": wandb.Image(fig),
+                "epoch": trainer.current_epoch
+            }) 
+            plt.close(fig)
+
+            categories_indices = categories_from_decoded_attr.argmax(dim=1).detach().cpu().numpy()
+            colors_np = np.vstack(colors_from_decoded_img)
+
+            fig = plot_rgb_distribution(colors_np, categories_indices)
+            output_dir = os.path.join(self.dirpath, "visual_logs")
+            os.makedirs(output_dir, exist_ok=True)
+
+            file_name = f"fig_color_distrib_epoch_{trainer.current_epoch:03d}.png"
+            save_path = os.path.join(output_dir, file_name)
+            fig.savefig(save_path, dpi=150, bbox_inches='tight')
+
+            trainer.logger.experiment.log({
+                "visuals/color_distrib": wandb.Image(fig),
+                "epoch": trainer.current_epoch
+            })
+
+            plt.close(fig)
+
+        pl_module.train()
+
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        self.save_checkpoint(trainer)
+        self.run_color_analysis(trainer, pl_module)
 
 
 def setup_logger_and_callbacks(config, 
@@ -276,7 +204,11 @@ def setup_logger_and_callbacks(config,
             save_last="link",
             save_top_k=1,
         ),
-        CustomFlexibleCheckpoint(dirpath=version_dir, switch_epoch=switch_epoch)    
+        CustomFlexibleCheckpoint(
+            project_name= project_name,
+            experiment_name= experiment_name,
+            dirpath=version_dir,
+            switch_epoch=switch_epoch)    
         ]
     
     return logger, callbacks, version_dir
@@ -380,7 +312,7 @@ if __name__ == "__main__":
     project_name = "syn"
     condition = "test"
     data = "biased_80"
-    switch_epoch = 600
+    switch_epoch = 300
 
     experiment_name = get_experiment_name(condition, data, switch_epoch)
     experiment_name = f"{condition}_{data}"

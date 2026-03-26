@@ -1,8 +1,12 @@
 import numpy as np
 import warnings
 import cv2
-import colorsys
 import torch
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+import torch.nn.functional as F
 
 def get_color_from_attr_batch(data: torch.Tensor) -> torch.Tensor:
     """
@@ -166,3 +170,138 @@ def get_color_from_img(image: np.ndarray, mask: np.ndarray, barycentre = False) 
             color[c] = 0.0
     return color
 
+def get_color_stats_per_category(colors_np, categories_indices):
+    unique_cats = np.unique(categories_indices)
+    stats = {}
+
+    for cat in unique_cats:
+        cat_mask = (categories_indices == cat)
+        cat_colors = colors_np[cat_mask]
+        
+        if len(cat_colors) == 0: continue
+
+        centroid = np.mean(cat_colors, axis=0)        
+        distances = np.linalg.norm(cat_colors - centroid, axis=1)        
+        avg_dist = np.mean(distances)
+        std_dist = np.std(distances)
+        
+        stats[cat] = {
+            'centroid': centroid,
+            'avg_dispersion': avg_dist,
+            'std_dispersion': std_dist,
+            'count': len(cat_colors)
+        }
+
+    return stats
+
+def plot_rgb_distribution(colors_np, categories_indices, cat_names={0:"diamond", 1:"egg", 2:"triangle"}, n_bins=40):
+    """
+    Affiche une grille compacte des distributions RGB par catégorie.
+    cat_names: dict {index: "nom"} (ex: {0: "Route", 1: "Trottoir"})
+    """
+    unique_cats = np.unique(categories_indices)
+    n_cats = len(unique_cats)
+    channels = ['Red', 'Green', 'Blue']
+    colors_palette = ['#e74c3c', '#2ecc71', '#3498db']     
+
+    fig, axes = plt.subplots(3, n_cats, figsize=(n_cats * 3, 7), sharex=True, sharey=False)
+    
+    if n_cats == 1:
+        axes = axes.reshape(3, 1)
+
+    for col, cat in enumerate(unique_cats):
+        mask = (categories_indices == cat)
+        cat_data = colors_np[mask]
+        
+        name = cat_names.get(cat, f"CAT {cat}") if cat_names else f"CAT {cat}"
+        
+        for row in range(3):
+            ax = axes[row, col]
+            
+            sns.histplot(
+                cat_data[:, row], 
+                bins=n_bins, 
+                kde=True, 
+                ax=ax, 
+                color=colors_palette[row],
+                element="step",
+                alpha=0.6
+            )
+            
+            ax.set_xlim(0, 255)
+            ax.tick_params(axis='both', which='major', labelsize=8) # Petites polices
+            
+            if row == 0:
+                ax.set_title(name.upper(), fontweight='bold', fontsize=10, pad=10)
+            
+            if col == 0:
+                ax.set_ylabel(channels[row], fontweight='bold', fontsize=9)
+            else:
+                ax.set_ylabel("")
+                ax.set_yticklabels([])
+            
+            if row == 2:
+                ax.set_xlabel("")
+            else:
+                ax.set_xlabel("")
+
+            # Clean design
+            for spine in ["top", "right"]:
+                ax.spines[spine].set_visible(False)
+
+    plt.tight_layout(pad=1.0)
+    return fig
+
+def plot_rgb_distribution_3D(categories_indices, colors_np):
+
+    unique_categories = np.unique(categories_indices)
+    n_categories = len(unique_categories)
+
+    fig = plt.figure(figsize=(n_categories * 5, 5)) # Adapte la taille selon le nombre de classes
+    fig.suptitle("Distribution des couleurs par catégorie (RGB Space)", fontsize=16)
+
+    for i, cat in enumerate(unique_categories):
+        ax = fig.add_subplot(1, n_categories, i + 1, projection='3d')
+        
+        mask = (categories_indices == cat)
+        cat_colors = colors_np[mask]
+        
+        point_colors = cat_colors / 255.0
+        point_colors = np.clip(point_colors, 0.0, 1.0)
+        
+        ax.scatter(cat_colors[:, 0],
+                cat_colors[:, 1],
+                cat_colors[:, 2],
+                c=point_colors,
+                s=50,
+                marker='o',
+                edgecolors='k',
+                linewidths=0.5)     
+
+        ax.set_title(f"Catégorie {cat}")
+        ax.set_xlabel("Rouge (R)")
+        ax.set_ylabel("Vert (G)")
+        ax.set_zlabel("Bleu (B)")
+        
+        ax.set_xlim(0, 255)
+        ax.set_ylim(0, 255)
+        ax.set_zlim(0, 255)
+
+    plt.tight_layout()
+    plt.show()
+
+def categorize_decoded_attr(decoded_attr: torch.Tensor) -> torch.Tensor:
+    # First three columns are the category
+    first_three = decoded_attr[:, :3]
+    
+    indices = torch.argmax(first_three, dim=1)
+    binary_categories = F.one_hot(indices, num_classes=3)
+    
+    return binary_categories.to(torch.float32) # Optionnel: convertir en float
+
+def get_attr_classification_stats(y_true, y_pred):
+    correct_mask = (y_true == y_pred)
+    accuracy_pct = np.mean(correct_mask) * 100
+    incorrect_indices = np.where(~correct_mask)[0]
+    
+    return accuracy_pct, incorrect_indices
