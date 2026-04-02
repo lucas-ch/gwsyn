@@ -9,7 +9,8 @@
             "type": "debugpy",
             "request": "launch",
             "name": "Python: Current File",
-            "program": "${file}",
+            //"program": "${file}",
+            "module": "syn_project.train",
             "console": "integratedTerminal",
             "justMyCode": false,
         }

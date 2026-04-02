@@ -11,7 +11,10 @@ global_workspace:
         n_layers: 2
 
     decoders:
-        hidden_dim: 256
+        hidden_dim:
+            attr: 256
+            attr_legacy_no_color: 256
+            v_latents: 256
         n_layers: 2
 
 

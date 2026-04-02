@@ -36,6 +36,8 @@ dependencies = [
     "scipy (>=1.17.1,<2.0.0)",
     "shimmer-ssd @ git+https://github.com/AEmanuelli/shimmer-ssd.git",
     "seaborn (>=0.13.2,<0.14.0)",
+    "statsmodels (>=0.14.6,<0.15.0)",
+    "scikit-posthocs (>=0.12.0,<0.13.0)",
 ]
 
 [tool.poetry.group.dev.dependencies]
