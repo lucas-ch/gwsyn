@@ -16,7 +16,6 @@ from torch import nn
 
 from pathlib import Path
 import matplotlib.pyplot as plt
-from torchvision.utils import make_grid
 from torch.utils.data import default_collate
 
 from lightning import LightningDataModule, Trainer
@@ -26,151 +25,10 @@ import torch.nn as nn
 import wandb
 from lightning.pytorch.callbacks import LearningRateMonitor, Callback
 from .utils_color_analysis import *
+from .utils_shape_loss import *
 from lightning.pytorch.loggers.wandb import WandbLogger
 from lightning.pytorch.callbacks import ModelCheckpoint
 import copy
-
-def get_mask_from_shapes_diff(images: torch.Tensor, temperature: float = 100.0) -> torch.Tensor:
-    """
-    Version différentiable de l'extraction de masque.
-    
-    Args:
-        images (torch.Tensor): Tensor de forme (B, C, H, W)
-        temperature (float): Contrôle la "dureté" du seuil. 
-                             Plus c'est élevé, plus c'est proche d'un masque binaire.
-    
-    Returns:
-        torch.Tensor: Masque "soft" entre 0 et 1.
-    """
-    # 1. Conversion en niveaux de gris si nécessaire (moyenne des canaux RGB)
-    if images.shape[1] == 3:
-        grayscale = images.mean(dim=1, keepdim=True).clone()
-    else:
-        grayscale = images.clone()
-
-    # 2. Normalisation optionnelle (si vos images ne sont pas déjà en [0, 1])
-    # On suppose ici que le fond est à 0 et l'objet est > 0.
-    
-    # 3. Sigmoid "Hard" : Approximation de (x > 0)
-    # On centre la sigmoid légèrement au dessus de 0 (ex: 0.05) pour éviter le bruit de fond
-    threshold = 0.1
-    masks = torch.sigmoid((grayscale - threshold) * temperature)
-    
-    return masks
-
-def dice_loss(pred, target, smooth=1):
-    """
-    Computes the Dice Loss for binary segmentation.
-    Args:
-        pred: Tensor of predictions (batch_size, 1, H, W).
-        target: Tensor of ground truth (batch_size, 1, H, W).
-        smooth: Smoothing factor to avoid division by zero.
-    Returns:
-        Scalar Dice Loss.
-    """
-    # Apply sigmoid to convert logits to probabilities
-    
-    # Calculate intersection and union
-    intersection = (pred * target).sum(dim=(2, 3))
-    union = pred.sum(dim=(2, 3)) + target.sum(dim=(2, 3))
-    
-    # Compute Dice Coefficient
-    dice = (2. * intersection + smooth) / (union + smooth)
-    
-    # Return Dice Loss
-    return 1 - dice.mean()
-
-def get_centroid(mask: torch.Tensor):
-    """
-    Calcule les coordonnées (x, y) du centre de masse d'un masque.
-    mask: Tensor de forme (B, 1, H, W)
-    """
-    B, C, H, W = mask.shape
-    device = mask.device
-    
-    # Création des grilles de coordonnées normalisées entre 0 et 1
-    # grid_x: [[0, 1, 2...], [0, 1, 2...]]
-    grid_y, grid_x = torch.meshgrid(
-        torch.linspace(0, 1, H, device=device),
-        torch.linspace(0, 1, W, device=device),
-        indexing='ij'
-    )
-    
-    # Somme des intensités pour la normalisation (la "masse" totale)
-    # On ajoute un epsilon pour éviter la division par zéro si le masque est noir
-    total_mass = mask.sum(dim=(2, 3)) + 1e-8
-    
-    # Calcul du centre de masse pondéré par l'intensité des pixels
-    pos_x = (mask * grid_x).sum(dim=(2, 3)) / total_mass
-    pos_y = (mask * grid_y).sum(dim=(2, 3)) / total_mass
-    
-    # Retourne un tenseur (B, 2) contenant les coordonnées [x, y]
-    return torch.cat([pos_x, pos_y], dim=1)
-
-def centroid_loss(m_pred, m_orig):
-    """Calcule la distance MSE entre les centres de masse."""
-    center_pred = get_centroid(m_pred)
-    center_orig = get_centroid(m_orig)
-    return F.mse_loss(center_pred, center_orig)
-
-def area_loss(m_pred, m_orig):
-    """
-    Force la surface totale (nombre de pixels activés) à être identique.
-    m_pred, m_orig: (B, 1, H, W)
-    """
-    # Somme des intensités des pixels (approximation de l'aire)
-    area_pred = m_pred.sum(dim=(1, 2, 3))
-    area_orig = m_orig.sum(dim=(1, 2, 3))
-    
-    # On utilise L1 pour une pénalité stable et linéaire
-    return F.l1_loss(area_pred, area_orig) / (32 * 32)
-
-def shape_loss(gw_mod: GlobalWorkspace2Domains, domain_latents: LatentsDomainGroupsT, raw_data: RawDomainGroupsT):
-    visual_module = cast(VisualLatentDomainModule, gw_mod.domain_mods["v_latents"])
-    visual_module.eval()
-    with torch.no_grad():
-            v_raw = raw_data[frozenset({'v_latents'})]['v_latents']
-            x_original = visual_module.decode_images(v_raw)
-            target = get_mask_from_shapes_diff(x_original).detach()
-
-    v_raw = raw_data[frozenset({'v_latents'})]['v_latents']
-    x_original = visual_module.decode_images(v_raw)
-    target = get_mask_from_shapes_diff(x_original)
-
-    latents = domain_latents[frozenset({'v_latents', 'attr'})]
-    domain_sources = {'attr': latents['attr']}
-    z = gw_mod.encode_and_fuse(domain_sources, SingleDomainSelection())
-
-    gw_decoded_latents = gw_mod.decode(z, domains={'v_latents'})['v_latents']
-    x_recons = visual_module.decode_images(gw_decoded_latents)
-    prediction = get_mask_from_shapes_diff(x_recons)
-
-    
-    centroid_l=centroid_loss(prediction, target)* 100
-
-    loss_output = LossOutput(centroid_l)
-
-    return loss_output 
-
-
-def traduction_loss(gw_mod: GlobalWorkspace2Domains, domain_latents: LatentsDomainGroupsT, raw_data: RawDomainGroupsT):
-    
-    domain_name_target = 'v_latents'
-
-    domains = frozenset({'v_latents', 'attr'})
-    latents = domain_latents[frozenset({'v_latents', 'attr'})]
-    domain_sources = {
-                domain: latents[domain]
-                for domain in domains
-                if domain != domain_name_target
-            }
-    z = gw_mod.encode_and_fuse(domain_sources, SingleDomainSelection())
-
-    prediction = gw_mod.decode(z, domains = {domain_name_target})[domain_name_target]
-    loss_output = LossOutput(F.mse_loss(
-        prediction, latents[domain_name_target], reduction="mean"))
-    
-    return loss_output
 
 def get_project_root():
     current = Path.cwd()
@@ -182,24 +40,10 @@ def get_project_root():
 ROOT_PATH = get_project_root()
 REGULAR_DATASET_PATH = f"{ROOT_PATH}/simple_shapes_dataset_biased_00"
 
-def add_noise(data, noise_params={"mean": 0.0, "std": 0.0}):
-    data_copy = copy.deepcopy(data)
-
-    key_fs = frozenset(["v_latents"])
-    latents = data_copy[key_fs]["v_latents"]
-
-    noise = torch.randn_like(latents) * noise_params['std'] + noise_params['mean']
-
-    data_copy[key_fs]["v_latents"] = latents + noise
-    
-    return data_copy
-
-
 class MyCustomGWLosses(GWLosses2Domains):
     def __init__(self, gw_mod, selection_mod, domain_mods, loss_coefs, contrastive_fn, custom_weights=None, noise=None):
         super().__init__(gw_mod, selection_mod, domain_mods, loss_coefs, contrastive_fn)
         self.custom_weights = custom_weights
-        self.noise=noise
 
     def step(
         self,
@@ -209,21 +53,16 @@ class MyCustomGWLosses(GWLosses2Domains):
     ) -> LossOutput:
         metrics: dict[str, torch.Tensor] = {}
 
-        noisy_data = add_noise(domain_latents, self.noise)
-
         if "shape_loss" in self.custom_weights.keys() and self.custom_weights["shape_loss"] > 0:
             current_shape_loss = shape_loss(self.gw_mod, domain_latents, raw_data)
-            print(current_shape_loss)
-            print(current_shape_loss)
             metrics.update({"shape_loss": current_shape_loss.loss})
 
         # 1. Calcul des métriques de base
         metrics.update(self.demi_cycle_loss(domain_latents, raw_data))
-        metrics.update(self.cycle_loss(noisy_data, raw_data))
-        metrics.update(self.translation_loss(noisy_data, raw_data))
-        metrics.update(self.contrastive_loss(noisy_data))
+        metrics.update(self.cycle_loss(domain_latents, raw_data))
+        metrics.update(self.translation_loss(domain_latents, raw_data))
+        metrics.update(self.contrastive_loss(domain_latents))
 
-#        test = traduction_loss(self.gw_mod, domain_latents, raw_data)
         custom_weights = self.custom_weights
 
         weighted_losses = []
@@ -324,9 +163,9 @@ class CustomFlexibleCheckpoint(Callback):
     def run_color_analysis(self, trainer:Trainer, pl_module):
         pl_module.eval()
         with torch.no_grad():
-            n_samples = 1 if "test1" in self.experiment_name else 1000
+            n_samples = 32 if "test1" in self.experiment_name else 1000
             data_module = get_data_module(self.project_name,  self.experiment_name)
-            test_samples = get_data_samples(data_module, n_samples, split= "test")
+            test_samples = get_data_samples(data_module, n_samples, split= "train")
             data_translated = get_data_translated(pl_module, test_samples, n_samples)            
             
             masks = get_mask_from_shapes(data_translated["train_images"])
@@ -496,50 +335,6 @@ def get_data_samples(data_module:SimpleShapesDataModule, n_samples:int, split="t
 
 
     return train_samples
-
-@torch.no_grad()
-def get_data_translated(global_workspace, train_samples, n_samples=32, fusion_attr_weight=1.0, show_results_fusion=False):
-    selection_mod = FusionMethod(n_samples, fusion_attr_weight)
-
-    visual_module = cast(VisualLatentDomainModule, global_workspace.domain_mods["v_latents"])
-    train_paired_samples = train_samples[frozenset(["v_latents", "attr"])]
-
-    train_images = visual_module.decode_images(train_paired_samples["v_latents"]).detach().cpu()
-    
-    train_attr = torch.cat((train_paired_samples["attr"][0], train_paired_samples["attr"][1]), dim=1).detach().cpu()
-
-    unimodal_latents = global_workspace.encode_domains(train_samples)
-    gw_latents = global_workspace.encode(unimodal_latents)
-
-    gw_latents_decoded = global_workspace.decode(gw_latents[frozenset({'v_latents', 'attr'})], ["v_latents", "attr"])
-
-    # Extraction et nettoyage
-    attr_decoded = gw_latents_decoded["attr"]["attr"]
-    images_decoded = visual_module.decode_images(gw_latents_decoded['attr']['v_latents']).detach().cpu()
-
-
-    if show_results_fusion:
-        gw_latents_fusion = global_workspace.encode_and_fuse(unimodal_latents, selection_mod)
-        gw_latents_fusion_decoded = global_workspace.decode(gw_latents_fusion, ["v_latents", "attr"])
-        attr_fusion_decoded = gw_latents_fusion_decoded[frozenset({'v_latents', 'attr'})]['attr']
-        images_fusion_decoded = visual_module.decode_images(gw_latents_fusion_decoded[frozenset({'v_latents', 'attr'})]['v_latents']).detach().cpu()
-
-        result_attr = attr_fusion_decoded
-        result_images = images_fusion_decoded
-    else:
-        result_attr = attr_decoded
-        result_images = images_decoded
-
-    torch.cuda.empty_cache()
-
-    return {
-        "train_images": train_images,
-        "train_attr": train_attr,
-        "images_decoded": result_images,
-        "attr_decoded": result_attr
-    }
-
-
 
 def init_weights(m: nn.Module, seed: int):
     """Applies Kaiming Normal initialization to Linear layers."""
@@ -734,31 +529,6 @@ def setup_global_workspace(
     
     return global_workspace, domain_modules
 
-def get_grid_numpy(samples, nrow=8):
-    grid = make_grid(samples, nrow=nrow, pad_value=1).permute(1, 2, 0)
-    return grid.detach().cpu().numpy()
-
-def plot_original_translated_comparison(original_images, result_images, max_images=32):
-    num_to_show = min(len(original_images), max_images)
-    orig_subset = original_images[:num_to_show]
-    res_subset = result_images[:num_to_show]    
-    
-    grid_train = get_grid_numpy(orig_subset)
-    grid_decoded = get_grid_numpy(res_subset)
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 7)) 
-
-    ax1.imshow(grid_train)
-    ax1.set_title("Images originales")
-    ax1.axis('off')
-
-    ax2.imshow(grid_decoded)
-    ax2.set_title("Images traduites: attr => GW => v_latents")
-    ax2.axis('off')
-
-    plt.tight_layout()
-    return fig
-
 def setup_data_module(data_path, config:Config, exclude_colors=True):
     """
     Set up the data module for training.
@@ -933,3 +703,46 @@ def train_global_workspace(
 
     
     return global_workspace, checkpoint_dir
+
+
+@torch.no_grad()
+def get_data_translated(global_workspace, train_samples, n_samples=32, fusion_attr_weight=1.0, show_results_fusion=False):
+    selection_mod = FusionMethod(n_samples, fusion_attr_weight)
+
+    visual_module = cast(VisualLatentDomainModule, global_workspace.domain_mods["v_latents"])
+    train_paired_samples = train_samples[frozenset(["v_latents", "attr"])]
+
+    train_images = visual_module.decode_images(train_paired_samples["v_latents"]).detach().cpu()
+    
+    train_attr = torch.cat((train_paired_samples["attr"][0], train_paired_samples["attr"][1]), dim=1).detach().cpu()
+
+    unimodal_latents = global_workspace.encode_domains(train_samples)
+    gw_latents = global_workspace.encode(unimodal_latents)
+
+    gw_latents_decoded = global_workspace.decode(gw_latents[frozenset({'v_latents', 'attr'})], ["v_latents", "attr"])
+
+    # Extraction et nettoyage
+    attr_decoded = gw_latents_decoded["attr"]["attr"]
+    images_decoded = visual_module.decode_images(gw_latents_decoded['attr']['v_latents']).detach().cpu()
+
+
+    if show_results_fusion:
+        gw_latents_fusion = global_workspace.encode_and_fuse(unimodal_latents, selection_mod)
+        gw_latents_fusion_decoded = global_workspace.decode(gw_latents_fusion, ["v_latents", "attr"])
+        attr_fusion_decoded = gw_latents_fusion_decoded[frozenset({'v_latents', 'attr'})]['attr']
+        images_fusion_decoded = visual_module.decode_images(gw_latents_fusion_decoded[frozenset({'v_latents', 'attr'})]['v_latents']).detach().cpu()
+
+        result_attr = attr_fusion_decoded
+        result_images = images_fusion_decoded
+    else:
+        result_attr = attr_decoded
+        result_images = images_decoded
+
+    torch.cuda.empty_cache()
+
+    return {
+        "train_images": train_images,
+        "train_attr": train_attr,
+        "images_decoded": result_images,
+        "attr_decoded": result_attr
+    }

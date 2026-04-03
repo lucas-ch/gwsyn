@@ -11,8 +11,8 @@ if __name__ == "__main__":
     config = load_config(f"{ROOT_PATH}/config", use_cli=False, load_files=["high_cycles.yaml"])
     
     project_name = "syn"
-    condition = "debug"
-    data = "test1"
+    condition = "shape_and_contrastive"
+    data = "biased_00"
     switch_epoch = 10000
 
     experiment_name = get_experiment_name(condition, data, switch_epoch)
@@ -20,7 +20,7 @@ if __name__ == "__main__":
 
     config.dataset.path = f"{ROOT_PATH}/simple_shapes_dataset_{data}"
     config.training.max_steps = 150000
-    config.training.batch_size = 32
+    config.training.batch_size = 1000
     config.seed = 0
 
     apply_custom_init = True
@@ -31,16 +31,16 @@ if __name__ == "__main__":
     }
 
     custom_weights = {
-            "cycle_attr_through_v_latents_loss_attr": 0.0,
-            "cycle_attr_through_v_latents_loss_cat": 0.0,
+            "cycle_attr_through_v_latents_loss_attr": 1.0,
+            "cycle_attr_through_v_latents_loss_cat": 10.0,
             "cycle_v_latents_through_attr": 0.0,
-            "demi_cycle_attr": 0.0,
-            "demi_cycle_v_latents": 0.0,
-            "translation_v_latents_to_attr_loss_attr": 0.0,
-            "translation_v_latents_to_attr_loss_cat": 0.0,
+            "demi_cycle_attr": 1.0,
+            "demi_cycle_v_latents": 1.0,
+            "translation_v_latents_to_attr_loss_attr": 1.0,
+            "translation_v_latents_to_attr_loss_cat": 10.0,
             "translation_attr_to_v_latents": 0.0,
             "contrastive_loss": 1.0,
-            "shape_loss": 0.0
+            "shape_loss": 5.0
         }
 
     noise = {"mean": 0.0, "std": 0.0}

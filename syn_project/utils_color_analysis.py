@@ -16,9 +16,53 @@ from matplotlib.ticker import MultipleLocator
 from matplotlib.lines import Line2D
 from statsmodels.stats.multicomp import pairwise_tukeyhsd
 import scikit_posthocs as sp
-from typing import Optional, Tuple
+from typing import Dict, Literal, Optional, Tuple
+
+from torchvision.utils import make_grid
+import cv2
+import numpy as np
 
 CAT_NAMES = {0:"diamond", 1:"egg", 2:"triangle"}
+
+
+def get_color_masks(images: torch.Tensor, s_thresh=50, v_min=30, v_max=225) -> np.ndarray:
+    images_numpy = images.permute(0, 2, 3, 1).detach().cpu().numpy()
+
+    colors = []
+    for i in range(images_numpy.shape[0]):
+        img = images_numpy[i]
+        color = get_color_mask(img, s_thresh, v_min, v_max)
+        colors.append(color)
+
+    return colors
+
+
+def get_color_mask(image: np.ndarray, s_thresh=50, v_min=30, v_max=225) -> np.ndarray:
+    """
+    Extrait les pixels colorés en excluant le noir, le blanc et le gris.
+    
+    Args:
+        image: Image RGB (float 0-1 ou uint8 0-255).
+        s_thresh: Seuil de saturation (plus c'est haut, plus on ignore les gris).
+        v_min: Seuil de noir (ignore ce qui est trop sombre).
+        v_max: Seuil de blanc (ignore ce qui est trop clair).
+    """
+    # Conversion en uint8 si nécessaire
+    if image.dtype == np.float32 or image.dtype == np.float64:
+        image = (image * 255).astype(np.uint8)
+        
+    # Passage en HSV
+    hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+    h, s, v = cv2.split(hsv)
+    
+    # Création du masque :
+    # 1. S > s_thresh : On veut de la couleur (pas de gris)
+    # 2. V > v_min    : On ne veut pas de noir
+    # 3. V < v_max    : On ne veut pas de blanc pur
+    color_mask = (s > s_thresh) & (v > v_min) & (v < v_max)
+    
+    return color_mask
+
 
 def get_color_from_attributes(data: torch.Tensor) -> torch.Tensor:
     if data.size(dim=1) < 11:
@@ -183,37 +227,6 @@ def get_color_from_image(image: np.ndarray, mask: np.ndarray, barycentre = False
         else:
             color[c] = 0.0
     return color
-
-
-def get_color_centroid_dispersion_per_category(colors_np: np.ndarray, categories_indices: np.ndarray) -> dict:
-    """Statistics about an array of rgb colors: centroid, dispersion, count.
-
-    colors_np is an array of RGB: [[0, 0, 255], [255, 255, 0], ...]
-    categories indices is an array of categories (diamon, egg, triangle): [0, 0, 2, 1...]
-    the 2 arrays correspond of the color and shape of an sample from simple_shapes_dataset
-    """
-    unique_cats = np.unique(categories_indices)
-    stats = {}
-
-    for cat in unique_cats:
-        cat_mask = (categories_indices == cat)
-        cat_colors = colors_np[cat_mask]
-        
-        if len(cat_colors) == 0: continue
-
-        centroid = np.mean(cat_colors, axis=0)        
-        distances = np.linalg.norm(cat_colors - centroid, axis=1)        
-        avg_dist = np.mean(distances)
-        std_dist = np.std(distances)
-        
-        stats[cat] = {
-            'centroid': centroid,
-            'avg_dispersion': avg_dist,
-            'std_dispersion': std_dist,
-            'count': len(cat_colors)
-        }
-
-    return stats
 
 def plot_rgb_distribution(colors_np: np.ndarray, categories_indices: np.ndarray, cat_names=CAT_NAMES, n_bins=40) -> Figure:
     """Displays RGB distribution per category.
@@ -386,7 +399,6 @@ def plot_color_history(
 
     return ax
 
-
 def plot_color_evolution_per_category(
     data_dir: str, 
     cat_names: dict[int, str] = CAT_NAMES, 
@@ -409,7 +421,6 @@ def plot_color_evolution_per_category(
     
     plt.tight_layout()
     return fig
-
 
 def plot_statistical_dominance_evolution(
     results_dict: dict[str, list[dict[str, any]]], 
@@ -479,70 +490,6 @@ def plot_statistical_dominance_evolution(
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     return fig
 
-def shapiro_colors(colors: np.ndarray, category_to_analyze: int, categories: np.ndarray) -> pd.DataFrame:
-    """
-    Performs a normality test (Shapiro-Wilk) and calculates skewness for each 
-    RGB channel within a specific category.
-
-    Parameters:
-        colors: Array of RGB values of the samples (N, 3).
-        category: The specific category ID to analyze.
-        categories: Array of category labels for the samples (N,).
-
-    Returns:
-        A pandas DataFrame containing Shapiro-Wilk p-values, normality status, 
-        and skewness coefficients for each color channel.
-    """
-    
-    cat_colors = colors[categories == category_to_analyze]
-    channels = ['Rouge', 'Vert', 'Bleu']
-    report = []
-
-    sample_size = min(len(cat_colors), 2000)
-    indices = np.random.choice(len(cat_colors), sample_size, replace=False)
-    sample = cat_colors[indices]
-
-    for i, col_name in enumerate(channels):
-        data_channel = sample[:, i]
-            
-        shapiro_stat, p_normal = stats.shapiro(data_channel)
-        is_normal = p_normal > 0.05
-            
-        skewness = stats.skew(data_channel)
-
-        report.append({
-                "category": category_to_analyze,
-                "color": col_name,
-                "p_normal": f"{p_normal:.4f}",
-                "is_normal": is_normal,
-                "skewness": round(skewness, 2)
-            })
-
-    return pd.DataFrame(report)
-
-def anova_colors(
-    colors: np.ndarray, 
-    category_to_analyze: int, 
-    categories: np.ndarray
-) -> stats._stats_py.F_onewayResult:
-    """
-    Performs a one-way ANOVA to test if the means of the R, G, and B channels 
-    are significantly different for a specific category.
-
-    Parameters:
-        colors: Array of RGB values of the samples (N, 3).
-        category: The specific category ID to analyze.
-        categories: Array of category labels for the samples (N,).
-    """
-    
-    cat_colors = colors[categories == category_to_analyze]
-            
-    r = cat_colors[:, 0]
-    g = cat_colors[:, 1]
-    b = cat_colors[:, 2]
-            
-    return stats.f_oneway(r, g, b)
-
 def kruskal_colors(
     colors: np.ndarray, 
     category_to_analyze: int, 
@@ -565,49 +512,6 @@ def kruskal_colors(
     
     return stats.kruskal(r, g, b)
 
-def tukey_colors(
-    colors: np.ndarray, 
-    category_to_analyze: int, 
-    categories: np.ndarray, 
-    categories_name = {0:"diamond", 1:"egg", 2:"triangle"}
-) -> dict[str, any]:
-    """
-    Performs Tukey's HSD post-hoc test to identify significant pairwise 
-    differences between color channels and determines if a clear winner exists.
-
-    Parameters:
-        colors: Array of RGB values of the samples (N, 3).
-        category: The specific category ID to analyze.
-        categories: Array of category labels for the samples (N,).
-        categories_name: Dict mapping category int and name
-
-    """
-    channels = ['red', 'green', 'blue']
-
-    cat_colors = colors[categories == category_to_analyze]
-    vals = cat_colors.flatten()
-    group_labels = np.tile(channels, len(cat_colors))
-        
-    tukey = pairwise_tukeyhsd(endog=vals, groups=group_labels, alpha=0.05)
-        
-    means = np.mean(cat_colors, axis=0)
-    dom_idx = np.argmax(means)
-    dom_name = channels[dom_idx]
-        
-    tukey_df = pd.DataFrame(data=tukey.summary().data[1:], columns=tukey.summary().data[0])
-        
-    is_clear_winner = all(tukey_df[((tukey_df['group1'] == dom_name) | 
-                                        (tukey_df['group2'] == dom_name))]['reject'])
-
-    name = categories_name.get(category_to_analyze, f"Cat {category_to_analyze}") if categories_name else f"Cat {category_to_analyze}"
-
-    return {
-        "name": name,
-        "dom_name": dom_name,
-        "is_clear_winner": is_clear_winner,
-        "means": means
-    }
-  
 def dunn_colors(
     colors: np.ndarray, 
     cat: int, 
@@ -636,7 +540,6 @@ def dunn_colors(
     is_dominant = all(p_matrix.loc[dom_name, other] < 0.05 for other in others)
 
     return dom_name, is_dominant, p_matrix
-
 
 def color_statisitical_dominance_analysis(
     data_dir: str
@@ -686,3 +589,85 @@ def color_statisitical_dominance_analysis(
         "dunn": dunn
     }
 
+def get_grid_numpy(samples, nrow=8):
+    grid = make_grid(samples, nrow=nrow, pad_value=1).permute(1, 2, 0)
+    return grid.detach().cpu().numpy()
+
+def plot_original_translated_comparison(original_images, result_images, max_images=32):
+    num_to_show = min(len(original_images), max_images)
+    orig_subset = original_images[:num_to_show]
+    res_subset = result_images[:num_to_show]    
+    
+    grid_train = get_grid_numpy(orig_subset)
+    grid_decoded = get_grid_numpy(res_subset)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 7)) 
+
+    ax1.imshow(grid_train)
+    ax1.set_title("Images originales")
+    ax1.axis('off')
+
+    ax2.imshow(grid_decoded)
+    ax2.set_title("Images traduites: attr => GW => v_latents")
+    ax2.axis('off')
+
+    plt.tight_layout()
+    return fig
+
+def get_samples_rgb(
+    data_translated: Dict[str, any], 
+    type: Literal['training', 'decoded', 'decoded_edge'] = 'training'
+) -> np.ndarray:
+    """
+    Extracts and aggregates color information from different image sources within the dataset.
+    
+    Args:
+        data_translated: Dictionary containing 'train_images' and 'images_decoded' tensors/arrays.
+        type: Selection string to determine which source to return:
+              - 'training': colors from the original training images.
+              - 'decoded': colors from the reconstructed images.
+              - 'decoded_edge': colors from the reconstructed images excluding black and white (usually edges).
+              
+    Returns:
+        A vertically stacked NumPy array of all detected pixel colors.
+    """
+    # Generate binary masks for shape localization
+    masks = get_mask_from_shapes(data_translated["train_images"])
+    masks_decoded = get_mask_from_shapes(data_translated["images_decoded"])
+
+    # Generate a specific mask for colorful pixels (excluding grayscale background/noise)
+    colors_masks = get_color_masks(data_translated["images_decoded"], 0, 0, 240)
+
+    # Extract pixel values (RGB) located within the defined masks
+    colors_from_training_img = get_color_from_images(data_translated["train_images"], masks)
+    colors_from_decoded_img = get_color_from_images(data_translated["images_decoded"], masks_decoded)
+    colors_from_decoded_img_edge = get_color_from_images(data_translated["images_decoded"], colors_masks)
+
+    # Default selection: Original training colors
+    colors_np = np.vstack(colors_from_training_img)
+    
+    # Switch output based on the 'type' argument
+    if type == "decoded":
+        colors_np = np.vstack(colors_from_decoded_img)
+    elif type == "decoded_edge":
+        colors_np = np.vstack(colors_from_decoded_img_edge)
+
+    return colors_np
+
+def get_categories_indices(data_translated: dict[str, torch.Tensor]) -> np.ndarray:
+    """
+    Converts raw decoded attributes into discrete category indices.
+    
+    Args:
+        data_translated: Dictionary containing 'attr_decoded' (tensor of attributes with categories one-hot coded).
+        
+    Returns:
+        A NumPy array of integers representing the class index for each sample.
+    """
+    # Convert raw attributes (logits) into categorized form (likely via softmax internally)
+    categories_from_decoded_attr = categorize_decoded_attr(data_translated["attr_decoded"])
+    
+    # Retrieve the index of the highest probability (Argmax) and move to CPU/NumPy for analysis
+    categories_indices = categories_from_decoded_attr.argmax(dim=1).detach().cpu().numpy()
+
+    return categories_indices
