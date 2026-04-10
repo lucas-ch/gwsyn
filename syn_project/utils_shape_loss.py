@@ -40,8 +40,10 @@ def dice_loss(pred:torch.Tensor, target:torch.Tensor, smooth=1)-> torch.Tensor:
     return 1 - dice.mean()
 
 def get_area(tensor:torch.Tensor)-> torch.Tensor:
+    MIN_AREA = 25
+    MAX_AREA = 128
     area = tensor.sum(dim=(1, 2, 3))
-    area_norm = (area - 25) / (128 - 25 + 1e-8)
+    area_norm = (area - MIN_AREA) / (MAX_AREA - MIN_AREA + 1e-8)
     return torch.clamp(area_norm, 0.0, 1.0)
 
 def get_centroid(mask:torch.Tensor)-> torch.Tensor:

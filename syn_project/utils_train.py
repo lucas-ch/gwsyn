@@ -168,8 +168,8 @@ class CustomFlexibleCheckpoint(Callback):
             test_samples = get_data_samples(data_module, n_samples, split= "train")
             data_translated = get_data_translated(pl_module, test_samples, n_samples)            
             
-            masks = get_mask_from_shapes(data_translated["train_images"])
-            masks_decoded = get_mask_from_shapes(data_translated["images_decoded"])
+            masks = get_color_masks(data_translated["train_images"])
+            masks_decoded = get_color_masks(data_translated["images_decoded"])
 
             colors_from_data_img = get_color_from_images(data_translated["train_images"], masks)
             colors_from_decoded_img = get_color_from_images(data_translated["images_decoded"], masks_decoded)
@@ -229,7 +229,7 @@ class CustomFlexibleCheckpoint(Callback):
         self.run_color_analysis(trainer, pl_module)
 
 class FusionMethod(SelectionBase):
-    def __init__(self, n_samples: int = 32, fusion_attr_weight: float = 0.5):
+    def __init__(self, n_samples: int = 32, fusion_attr_weight: float = 1.0):
         super().__init__()
         self.n_samples = n_samples
         self.fusion_attr_weight = fusion_attr_weight
@@ -684,7 +684,7 @@ def train_global_workspace(
     # 4. Create trainer
     trainer = Trainer(
         logger=logger,
-        max_steps=config.training.max_steps,
+        max_epochs=300,
         default_root_dir=config.default_root_dir,
         callbacks=callbacks,
         precision=config.training.precision,

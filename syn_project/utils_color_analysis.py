@@ -14,7 +14,6 @@ import os
 import glob
 from matplotlib.ticker import MultipleLocator
 from matplotlib.lines import Line2D
-from statsmodels.stats.multicomp import pairwise_tukeyhsd
 import scikit_posthocs as sp
 from typing import Dict, Literal, Optional, Tuple
 
@@ -25,7 +24,7 @@ import numpy as np
 CAT_NAMES = {0:"diamond", 1:"egg", 2:"triangle"}
 
 
-def get_color_masks(images: torch.Tensor, s_thresh=50, v_min=30, v_max=225) -> np.ndarray:
+def get_color_masks(images: torch.Tensor, s_thresh=0, v_min=0, v_max=254) -> np.ndarray:
     images_numpy = images.permute(0, 2, 3, 1).detach().cpu().numpy()
 
     colors = []
@@ -145,7 +144,7 @@ def get_color_from_image(image: np.ndarray, mask: np.ndarray, barycentre = False
             return np.mean(image, axis=(0, 1))
             
         # Check if mask has enough pixels
-        if np.sum(mask) < 10:
+        if np.sum(mask) < 3:
             warnings.warn("Empty mask detected; using full image for color extraction")
             return np.mean(image, axis=(0, 1))
             
@@ -241,7 +240,7 @@ def plot_rgb_distribution(colors_np: np.ndarray, categories_indices: np.ndarray,
     channels = ['Red', 'Green', 'Blue']
     colors_palette = ['#e74c3c', '#2ecc71', '#3498db']     
 
-    fig, axes = plt.subplots(3, n_cats, figsize=(n_cats * 3, 7), sharex=True, sharey=False)
+    fig, axes = plt.subplots(3, n_cats, figsize=(n_cats * 2.5, 6), sharex=True, sharey=False)
     
     if n_cats == 1:
         axes = axes.reshape(3, 1)
@@ -427,25 +426,22 @@ def plot_statistical_dominance_evolution(
     cat_names: Optional[dict[int, str]] = None, 
     vline_epoch: Optional[int] = None
 ) -> Figure:
-    """
-    Plots the evolution of the Kruskal-Wallis H-statistic across epochs for each category.
-    Each subplot represents a category, with markers colored according to the 
-    statistically dominant color identified by the Dunn post-hoc test.
-
-    Parameters:
-        results_dict: Dictionary containing "kruskal" and "dunn" analysis results.
-        cat_names: Optional mapping of category IDs to human-readable names.
-        vline_epoch: Optional epoch index to draw a vertical reference line.
-    """
+    
     df_k = pd.DataFrame(results_dict["kruskal"]).rename(columns={'f_stat': 'h_stat'})
     df_d = pd.DataFrame(results_dict["dunn"])
     df = pd.merge(df_k, df_d, on=['epoch', 'category']).sort_values(['category', 'epoch'])
+    
+    # --- CALCUL DE L'ÉCHELLE COMMUNE ---
+    # On trouve le max global pour fixer la limite Y identique sur tous les graphes
+    y_max_global = df['h_stat'].max() * 1.15  # +15% de marge pour la lisibilité
+    # ------------------------------------
     
     unique_cats = sorted(df['category'].unique())
     n_cats = len(unique_cats)
     
     color_map = {'R': '#e74c3c', 'G': '#2ecc71', 'B': '#3498db', 'None': '#95a5a6'}
 
+    # On peut aussi ajouter sharey=True ici, mais le réglage manuel ci-dessous est plus précis
     fig, axes = plt.subplots(n_cats, 1, figsize=(10, 3 * n_cats), sharex=True)
     if n_cats == 1: axes = [axes]
 
@@ -464,10 +460,9 @@ def plot_statistical_dominance_evolution(
         ax.scatter(cat_data['epoch'], cat_data['h_stat'], 
                    c=point_colors, s=8, edgecolors='none', zorder=2)
 
-        ax.set_ylim(bottom=0)
-        
-        current_ylim = ax.get_ylim()
-        ax.set_ylim(0, current_ylim[1] * 1.1)
+        # --- APPLICATION DE L'ÉCHELLE COMMUNE ---
+        ax.set_ylim(0, y_max_global)
+        # ----------------------------------------
 
         ax.set_title(f"Statistical bias (H-Stat) : {cat_label.upper()}", fontweight='bold', loc='left')
         ax.set_ylabel("Bias intensity")
@@ -601,17 +596,21 @@ def plot_original_translated_comparison(original_images, result_images, max_imag
     grid_train = get_grid_numpy(orig_subset)
     grid_decoded = get_grid_numpy(res_subset)
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 7)) 
+    # 1. On retire "constrained_layout" pour éviter le conflit
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4)) 
 
     ax1.imshow(grid_train)
     ax1.set_title("Images originales")
     ax1.axis('off')
 
     ax2.imshow(grid_decoded)
-    ax2.set_title("Images traduites: attr => GW => v_latents")
+    ax2.set_title("Images traduites")
     ax2.axis('off')
 
-    plt.tight_layout()
+    # 2. On ajuste manuellement : top/bottom gèrent les espaces blancs verticaux
+    # wspace gère l'espace entre les deux colonnes
+    fig.subplots_adjust(top=0.95, bottom=0.05, right=0.98, left=0.02, wspace=0.05)
+
     return fig
 
 def get_samples_rgb(
@@ -636,7 +635,7 @@ def get_samples_rgb(
     masks_decoded = get_mask_from_shapes(data_translated["images_decoded"])
 
     # Generate a specific mask for colorful pixels (excluding grayscale background/noise)
-    colors_masks = get_color_masks(data_translated["images_decoded"], 0, 0, 240)
+    colors_masks = get_color_masks(data_translated["images_decoded"], 0, 0, 254)
 
     # Extract pixel values (RGB) located within the defined masks
     colors_from_training_img = get_color_from_images(data_translated["train_images"], masks)
@@ -654,18 +653,19 @@ def get_samples_rgb(
 
     return colors_np
 
-def get_categories_indices(data_translated: dict[str, torch.Tensor]) -> np.ndarray:
+def get_categories_indices(data_translated: dict[str, torch.Tensor], attr_type = 'attr_decoded') -> np.ndarray:
     """
     Converts raw decoded attributes into discrete category indices.
     
     Args:
-        data_translated: Dictionary containing 'attr_decoded' (tensor of attributes with categories one-hot coded).
+        data_translated: Dictionary containing 'attr_decoded' and/or 'train_attr'(tensors of attributes with categories one-hot coded).
         
     Returns:
         A NumPy array of integers representing the class index for each sample.
     """
+
     # Convert raw attributes (logits) into categorized form (likely via softmax internally)
-    categories_from_decoded_attr = categorize_decoded_attr(data_translated["attr_decoded"])
+    categories_from_decoded_attr = categorize_decoded_attr(data_translated[attr_type])
     
     # Retrieve the index of the highest probability (Argmax) and move to CPU/NumPy for analysis
     categories_indices = categories_from_decoded_attr.argmax(dim=1).detach().cpu().numpy()
