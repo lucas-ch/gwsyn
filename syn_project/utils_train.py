@@ -45,6 +45,50 @@ class MyCustomGWLosses(GWLosses2Domains):
         super().__init__(gw_mod, selection_mod, domain_mods, loss_coefs, contrastive_fn)
         self.custom_weights = custom_weights
 
+
+    def demi_cycle_loss(self,
+        latent_domains: LatentsDomainGroupsT,
+        raw_data: RawDomainGroupsT,
+    ) -> dict[str, torch.Tensor]:
+        """
+        Computes the demi-cycle loss.
+        This return multiple metrics:
+            * `demi_cycle_{domain_name}` with the demi-cycle of a particular domain;
+            * `demi_cycle_{domain_name}_{metric}` with additional metrics provided by
+                the domain_mod's `compute_dcy_loss` output;
+            * `demi_cycles` with the average value of all `demi_cycle_{domain_name}` values.
+        Args:
+            gw_mod (`shimmer.modules.gw_module.GWModuleBase`): The GWModule to use
+            domain_mods (`Mapping[str, DomainModule]`): the domain modules
+            latent_domains (`shimmer.types.LatentsDomainGroupsT`): the latent unimodal
+                groups
+            raw_data (`RawDomainGroupsT`): raw input data
+        Returns:
+            `dict[str, torch.Tensor]`: a dict of metrics.
+        """
+        losses: dict[str, torch.Tensor] = {}
+        metrics: dict[str, torch.Tensor] = {}
+        for domains, latents in latent_domains.items():
+            if len(domains) > 1:
+                continue
+            domain_name = next(iter(domains))
+
+            domain_mod = self.domain_mods[domain_name]
+            gw_latents = self.gw_mod.encode(latents)
+            x_recons = self.gw_mod.decode(gw_latents[domain_name])[domain_name]
+            loss_output = domain_mod.compute_dcy_loss(
+                x_recons, latents[domain_name], raw_data[domains][domain_name]
+            )
+            if loss_output is None:
+                continue
+            losses[f"demi_cycle_{domain_name}"] = loss_output.loss
+            metrics.update(
+                {f"demi_cycle_{domain_name}_{k}": v for k, v in loss_output.metrics.items()}
+            )
+        losses["demi_cycles"] = torch.stack(list(losses.values()), dim=0).mean()
+        losses.update(metrics)
+        return losses
+
     def step(
         self,
         raw_data: RawDomainGroupsT,
@@ -189,7 +233,8 @@ class CustomFlexibleCheckpoint(Callback):
                 categories_from_decoded_attr=categories_from_decoded_attr.detach().cpu().numpy()
             )
         
-            fig = plot_original_translated_comparison(data_translated["train_images"], data_translated["images_decoded"])
+            orig_subset, decoded_subset = get_top_img_per_category(data_translated)
+            fig = plot_original_translated_comparison(orig_subset, decoded_subset)
             output_dir = os.path.join(self.dirpath, "visual_logs")
             os.makedirs(output_dir, exist_ok=True)
 
@@ -517,6 +562,7 @@ def setup_global_workspace(
         domain_mods=domain_modules,
         gw_encoders=gw_encoders,
         gw_decoders=gw_decoders,
+        strict=False
     )
         # Reset the optimizer and scheduler
         global_workspace.optimizer = None
@@ -684,7 +730,7 @@ def train_global_workspace(
     # 4. Create trainer
     trainer = Trainer(
         logger=logger,
-        max_epochs=300,
+        max_epochs=50,
         default_root_dir=config.default_root_dir,
         callbacks=callbacks,
         precision=config.training.precision,

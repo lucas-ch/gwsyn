@@ -584,11 +584,31 @@ def color_statisitical_dominance_analysis(
         "dunn": dunn
     }
 
-def get_grid_numpy(samples, nrow=8):
+def get_top_img_per_category(results, n = 10):
+    attr = results["attr_decoded"]
+    categories = torch.argmax(attr[:, :3], dim=1)
+
+    selected_orig = []
+    selected_decoded = []
+
+    for cat in range(3):
+        indices = (categories == cat).nonzero(as_tuple=True)[0]
+
+        top_indices = indices[:n].to('cpu')
+
+        selected_orig.append(results["train_images"][top_indices])
+        selected_decoded.append(results["images_decoded"][top_indices])
+
+    final_orig = torch.cat(selected_orig, dim=0)
+    final_decoded = torch.cat(selected_decoded, dim=0)
+
+    return final_orig, final_decoded
+
+def get_grid_numpy(samples, nrow=10):
     grid = make_grid(samples, nrow=nrow, pad_value=1).permute(1, 2, 0)
     return grid.detach().cpu().numpy()
 
-def plot_original_translated_comparison(original_images, result_images, max_images=32):
+def plot_original_translated_comparison(original_images, result_images, max_images=30):
     num_to_show = min(len(original_images), max_images)
     orig_subset = original_images[:num_to_show]
     res_subset = result_images[:num_to_show]    

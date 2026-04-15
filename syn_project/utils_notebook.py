@@ -350,8 +350,9 @@ def get_stats(project_name, experiment_name, n_samples_test, split="test"):
 
     table  = generate_summary_table(correlation_stats, constrast_stats, training_stats)
 
+    orig_subset, decoded_subset = get_top_img_per_category(data_translated)
     fig_rgb_distrib = plot_rgb_distribution(colors_np, categories_indices_train, n_bins=50)
-    fig_original_translated = plot_original_translated_comparison(data_translated["train_images"], data_translated["images_decoded"])
+    fig_original_translated = plot_original_translated_comparison(orig_subset, decoded_subset)
 
     return {
         "correlation_stats": correlation_stats,
