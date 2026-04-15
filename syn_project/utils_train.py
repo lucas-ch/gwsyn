@@ -1,13 +1,15 @@
 from datetime import datetime
+from enum import Enum, auto
 import os
 import pickle
-from typing import Any, cast
+from typing import cast
 from collections.abc import Mapping
 
-from shimmer import ContrastiveLoss, GWLosses2Domains, GlobalWorkspace2Domains, LatentsDomainGroupsT, LossOutput, ModelModeT, RawDomainGroupsT, SelectionBase, SingleDomainSelection, combine_loss
+from shimmer import ContrastiveLoss, GWLosses2Domains, GlobalWorkspace2Domains, LatentsDomainGroupsT, LossOutput, ModelModeT, RawDomainGroupsT, SelectionBase
 from shimmer_ssd.logging import batch_to_device
-from shimmer_ssd.modules.domains.visual import VisualLatentDomainModule, mse_loss
+from shimmer_ssd.modules.domains.visual import VisualLatentDomainModule
 from simple_shapes_dataset import SimpleShapesDataModule, get_default_domains
+from torch.optim.lr_scheduler import OneCycleLR
 
 import numpy as np
 import torch
@@ -16,6 +18,7 @@ from torch import nn
 
 from pathlib import Path
 import matplotlib.pyplot as plt
+from torch.optim import AdamW
 from torch.utils.data import default_collate
 
 from lightning import LightningDataModule, Trainer
@@ -28,7 +31,6 @@ from .utils_color_analysis import *
 from .utils_shape_loss import *
 from lightning.pytorch.loggers.wandb import WandbLogger
 from lightning.pytorch.callbacks import ModelCheckpoint
-import copy
 
 def get_project_root():
     current = Path.cwd()
@@ -44,6 +46,53 @@ class MyCustomGWLosses(GWLosses2Domains):
     def __init__(self, gw_mod, selection_mod, domain_mods, loss_coefs, contrastive_fn, custom_weights=None, noise=None):
         super().__init__(gw_mod, selection_mod, domain_mods, loss_coefs, contrastive_fn)
         self.custom_weights = custom_weights
+
+    def demi_cycle_loss(self,
+        latent_domains: LatentsDomainGroupsT,
+        raw_data: RawDomainGroupsT,
+    ) -> dict[str, torch.Tensor]:
+        """
+        Computes the demi-cycle loss.
+
+        This return multiple metrics:
+            * `demi_cycle_{domain_name}` with the demi-cycle of a particular domain;
+            * `demi_cycle_{domain_name}_{metric}` with additional metrics provided by
+                the domain_mod's `compute_dcy_loss` output;
+            * `demi_cycles` with the average value of all `demi_cycle_{domain_name}` values.
+
+        Args:
+            gw_mod (`shimmer.modules.gw_module.GWModuleBase`): The GWModule to use
+            domain_mods (`Mapping[str, DomainModule]`): the domain modules
+            latent_domains (`shimmer.types.LatentsDomainGroupsT`): the latent unimodal
+                groups
+            raw_data (`RawDomainGroupsT`): raw input data
+
+        Returns:
+            `dict[str, torch.Tensor]`: a dict of metrics.
+        """
+        losses: dict[str, torch.Tensor] = {}
+        metrics: dict[str, torch.Tensor] = {}
+        for domains, latents in latent_domains.items():
+            if len(domains) > 1:
+                continue
+            domain_name = next(iter(domains))
+
+            domain_mod = self.domain_mods[domain_name]
+            gw_latents = self.gw_mod.encode(latents)
+            x_recons = self.gw_mod.decode(gw_latents[domain_name])[domain_name]
+            loss_output = domain_mod.compute_dcy_loss(
+                x_recons, latents[domain_name], raw_data[domains][domain_name]
+            )
+            if loss_output is None:
+                continue
+            losses[f"demi_cycle_{domain_name}"] = loss_output.loss
+            metrics.update(
+                {f"demi_cycle_{domain_name}_{k}": v for k, v in loss_output.metrics.items()}
+            )
+        losses["demi_cycles"] = torch.stack(list(losses.values()), dim=0).mean()
+        losses.update(metrics)
+        return losses
+
 
     def step(
         self,
@@ -106,6 +155,129 @@ class MyGlobalWorkspace(GlobalWorkspace2Domains):
             custom_weights,
             noise
         )
+
+class LatentDiscriminator(nn.Module):
+    def __init__(self, workspace_dim: int):
+        super().__init__()
+        self.model = nn.Sequential(
+            nn.Linear(workspace_dim, 256),
+            nn.LeakyReLU(0.2),
+            nn.Linear(256, 128),
+            nn.LeakyReLU(0.2),
+            nn.Linear(128, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, z):
+        return self.model(z)
+
+class OneCycleSchedulerSentinel(Enum):
+    """
+    Used for backward-compatibility issues to use One-Cycle Scheduler by default
+    """
+
+    DEFAULT = auto()
+
+class AdversarialGlobalWorkspace(MyGlobalWorkspace):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # On ajoute le discriminateur
+        self.discriminator = LatentDiscriminator(self.workspace_dim)
+        self.adversarial_loss = nn.BCELoss()
+        
+        # Important pour Lightning lors de l'utilisation de plusieurs optimiseurs
+        self.automatic_optimization = False
+
+    def training_step(self, batch, batch_idx):
+        # On récupère les deux optimiseurs (Générateur et Discriminateur)
+        opt_g, opt_d = self.optimizers()
+
+        # 1. Préparation des latents
+        # On encode les domaines pour obtenir les représentations latentes
+        domain_latents = self.encode_domains(batch)
+        gw_latents = self.encode(domain_latents)
+        
+        # Supposons que tu compares le domaine "A" (faussaire) au domaine "B" (réel)
+        # Il faudra adapter les clés selon tes frozensets
+        z_fake = gw_latents[frozenset({'attr','v_latents'})]["attr"]
+        z_real = gw_latents[frozenset({'attr','v_latents'})]["v_latents"]
+
+        # --- ENTRAÎNEMENT DU DISCRIMINATEUR ---
+        self.toggle_optimizer(opt_d)
+        
+        # Score sur le réel (doit tendre vers 1)
+        d_real = self.discriminator(z_real.detach()) # .detach() car on ne veut pas update l'encodeur B ici
+        loss_d_real = self.adversarial_loss(d_real, torch.ones_like(d_real))
+
+        # Score sur le faux (doit tendre vers 0)
+        d_fake = self.discriminator(z_fake.detach())
+        loss_d_fake = self.adversarial_loss(d_fake, torch.zeros_like(d_fake))
+
+        loss_d = (loss_d_real + loss_d_fake) / 2
+        
+        self.manual_backward(loss_d)
+        opt_d.step()
+        opt_d.zero_grad()
+        self.untoggle_optimizer(opt_d)
+
+        # --- ENTRAÎNEMENT DU GÉNÉRATEUR (Modèle Global Workspace) ---
+        self.toggle_optimizer(opt_g)
+        
+        # Perte de base du Global Workspace (demi-cycles, etc.)
+        loss_output = self.loss_mod.step(batch, domain_latents, mode="train")
+        gw_loss = loss_output.loss
+        
+        # Perte Adversariale (on veut que le discriminateur croie que z_fake est vrai)
+        d_fake_g = self.discriminator(z_fake)
+        g_adv_loss = self.adversarial_loss(d_fake_g, torch.ones_like(d_fake_g))
+        
+        # On combine (tu peux ajouter un poids lambda ici)
+        total_g_loss = 1.0 * gw_loss + 0.1 * g_adv_loss
+        
+        self.manual_backward(total_g_loss)
+        opt_g.step()
+        opt_g.zero_grad()
+        self.untoggle_optimizer(opt_g)
+
+        sch = self.lr_schedulers()
+        if sch is not None:
+            sch.step()
+
+        # Logging
+        self.log("train/loss_d", loss_d, prog_bar=True)
+        self.log("train/loss_g_adv", g_adv_loss, prog_bar=True)
+        self.log("train/gw_loss", gw_loss, prog_bar=True)
+
+    def configure_optimizers(self):
+        # 1. On filtre les paramètres pour opt_g (tout SAUF le discriminateur)
+        # On utilise named_parameters pour identifier les modules par leur nom
+        params_g = [p for n, p in self.named_parameters() if "discriminator" not in n]
+        
+        opt_g = AdamW(
+            params_g, 
+            lr=self.optim_lr, 
+            weight_decay=self.optim_weight_decay
+        )
+
+        # 2. On crée opt_d avec UNIQUEMENT le discriminateur
+        opt_d = AdamW(self.discriminator.parameters(), lr=self.optim_lr)
+
+        # 3. Gestion du scheduler (si présent dans la classe de base)
+        # On récupère la logique du scheduler de la classe mère si besoin
+        # Mais attention : OneCycleLR a besoin du bon optimiseur (opt_g)
+        schedulers = []
+        if self.scheduler is not None:
+            if isinstance(self.scheduler, OneCycleSchedulerSentinel):
+                lr_scheduler = OneCycleLR(opt_g, **self.scheduler_args)
+            else:
+                lr_scheduler = self.scheduler(opt_g)
+                
+            schedulers.append({
+                "scheduler": lr_scheduler,
+                "interval": "step",
+            })
+
+        return [opt_g, opt_d], schedulers
 
 class SequentialDataModule(LightningDataModule):
     def __init__(self, data_module_1:LightningDataModule, data_module_2:LightningDataModule, switch_epoch:int):
@@ -189,7 +361,8 @@ class CustomFlexibleCheckpoint(Callback):
                 categories_from_decoded_attr=categories_from_decoded_attr.detach().cpu().numpy()
             )
         
-            fig = plot_original_translated_comparison(data_translated["train_images"], data_translated["images_decoded"])
+            orig_subset, decoded_subset = get_top_8_per_category(data_translated)
+            fig = plot_original_translated_comparison(orig_subset, decoded_subset)
             output_dir = os.path.join(self.dirpath, "visual_logs")
             os.makedirs(output_dir, exist_ok=True)
 
@@ -466,6 +639,7 @@ def setup_global_workspace(
         else:
             print(f"Scheduler type {scheduler_type} not supported")
             return None
+
     # Load domains and create GW
     domain_modules, gw_encoders, gw_decoders = load_pretrained_domains(
         domains,
@@ -491,7 +665,7 @@ def setup_global_workspace(
             decoder = gw_decoders[modality]
             decoder.apply(lambda m: init_weights(m, config.seed))
 
-    global_workspace = MyGlobalWorkspace(
+    global_workspace = AdversarialGlobalWorkspace(
         domain_mods= domain_modules,
         gw_encoders = gw_encoders,
         gw_decoders = gw_decoders,
@@ -517,6 +691,7 @@ def setup_global_workspace(
         domain_mods=domain_modules,
         gw_encoders=gw_encoders,
         gw_decoders=gw_decoders,
+        strict=False
     )
         # Reset the optimizer and scheduler
         global_workspace.optimizer = None
@@ -684,14 +859,12 @@ def train_global_workspace(
     # 4. Create trainer
     trainer = Trainer(
         logger=logger,
-        max_epochs=300,
+        max_epochs=150,
         default_root_dir=config.default_root_dir,
         callbacks=callbacks,
         precision=config.training.precision,
         accelerator=config.training.accelerator,
         devices=config.training.devices,
-        gradient_clip_val=1.0,  # Set your desired clipping value here
-        gradient_clip_algorithm="value",
         reload_dataloaders_every_n_epochs=1
     )
     
@@ -704,9 +877,45 @@ def train_global_workspace(
     
     return global_workspace, checkpoint_dir
 
+def boost_saturation(tensor, factor=4.0):
+    """
+    Sature un tenseur d'images (B, 3, H, W).
+    factor > 1.0 : augmente la saturation.
+    factor = 1.0 : aucune modification.
+    0.0 <= factor < 1.0 : désature (tend vers le gris).
+    """
+    # 1. Calcul de la luminance (niveaux de gris) selon les poids standards RGB
+    # Formule : Y = 0.299*R + 0.587*G + 0.114*B
+    weights = torch.tensor([0.299, 0.587, 0.114], device=tensor.device).view(1, 3, 1, 1)
+    grayscale = (tensor * weights).sum(dim=1, keepdim=True)
+    
+    # 2. Interpolation linéaire : grayscale + factor * (original - grayscale)
+    saturated = torch.lerp(grayscale, tensor, factor)
+    
+    # 3. On contraint les valeurs entre 0 et 1 pour éviter les artefacts numériques
+    return torch.clamp(saturated, 0, 1)
+
+
+def sort_results_by_category(results):
+    # 1. On récupère les attributs décodés [Batch, 8]
+    attr = results["attr_decoded"]
+    
+    # 2. On isole les 3 premières colonnes et on trouve l'index du max (la catégorie)
+    # categories sera un vecteur de taille [Batch] contenant des 0, 1 ou 2
+    categories = torch.argmax(attr[:, :3], dim=1)
+    
+    # 3. On génère les indices de tri (ordre stable pour garder l'ordre initial au sein d'une catégorie)
+    indices_tri = torch.argsort(categories, descending=False, stable=True).to('cpu')
+    
+    # 4. On réapplique ces indices sur chaque tenseur du dictionnaire
+    sorted_results = {
+        key: value[indices_tri] for key, value in results.items()
+    }
+    
+    return sorted_results
 
 @torch.no_grad()
-def get_data_translated(global_workspace, train_samples, n_samples=32, fusion_attr_weight=1.0, show_results_fusion=False):
+def get_data_translated(global_workspace, train_samples, n_samples=32, fusion_attr_weight=1.0, show_results_fusion=False, saturation=0.0):
     selection_mod = FusionMethod(n_samples, fusion_attr_weight)
 
     visual_module = cast(VisualLatentDomainModule, global_workspace.domain_mods["v_latents"])

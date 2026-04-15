@@ -584,11 +584,37 @@ def color_statisitical_dominance_analysis(
         "dunn": dunn
     }
 
+def get_top_8_per_category(results):
+    attr = results["attr_decoded"]
+    # Détermination de la catégorie (0, 1 ou 2) via le max des 3 premières colonnes
+    categories = torch.argmax(attr[:, :3], dim=1)
+    
+    selected_orig = []
+    selected_decoded = []
+    
+    # On boucle sur les 3 catégories possibles
+    for cat in range(3):
+        # On trouve les indices où la catégorie correspond
+        indices = (categories == cat).nonzero(as_tuple=True)[0]
+        
+        # On prend les 8 premiers (ou moins si la catégorie a moins de 8 éléments)
+        top_indices = indices[:8].to('cpu')
+        
+        selected_orig.append(results["train_images"][top_indices])
+        selected_decoded.append(results["images_decoded"][top_indices])
+    
+    # On concatène pour obtenir un tenseur final de taille [24, C, H, W] 
+    # (8 images x 3 catégories)
+    final_orig = torch.cat(selected_orig, dim=0)
+    final_decoded = torch.cat(selected_decoded, dim=0)
+    
+    return final_orig, final_decoded
+
 def get_grid_numpy(samples, nrow=8):
     grid = make_grid(samples, nrow=nrow, pad_value=1).permute(1, 2, 0)
     return grid.detach().cpu().numpy()
 
-def plot_original_translated_comparison(original_images, result_images, max_images=32):
+def plot_original_translated_comparison(original_images, result_images, max_images=24):
     num_to_show = min(len(original_images), max_images)
     orig_subset = original_images[:num_to_show]
     res_subset = result_images[:num_to_show]    

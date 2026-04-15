@@ -331,12 +331,12 @@ def generate_summary_table(correlation_stats, constrast_stats, training_stats):
     
     return styled_df
 
-def get_stats(project_name, experiment_name, n_samples_test, split="test"):
+def get_stats(project_name, experiment_name, n_samples_test, split="test", saturation=0.0):
 
     global_workspace = get_global_workspace(project_name, experiment_name)
     data_module = get_data_module(project_name,  experiment_name)
     test_samples = get_data_samples(data_module, n_samples_test, split= split)
-    data_translated = get_data_translated(global_workspace, test_samples, n_samples_test)
+    data_translated = get_data_translated(global_workspace, test_samples, n_samples_test, saturation=saturation)
 
     colors_np = get_samples_rgb(data_translated, "decoded_edge")
     categories_indices_train = get_categories_indices(data_translated, 'train_attr')
@@ -350,8 +350,9 @@ def get_stats(project_name, experiment_name, n_samples_test, split="test"):
 
     table  = generate_summary_table(correlation_stats, constrast_stats, training_stats)
 
+    orig_subset, decoded_subset = get_top_8_per_category(data_translated)
     fig_rgb_distrib = plot_rgb_distribution(colors_np, categories_indices_train, n_bins=50)
-    fig_original_translated = plot_original_translated_comparison(data_translated["train_images"], data_translated["images_decoded"])
+    fig_original_translated = plot_original_translated_comparison(orig_subset, decoded_subset)
 
     return {
         "correlation_stats": correlation_stats,

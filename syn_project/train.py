@@ -10,17 +10,16 @@ if __name__ == "__main__":
     config = load_config(f"{ROOT_PATH}/config", use_cli=False, load_files=["high_cycles.yaml"])
     
     project_name = "syn"
-    condition = "shape_124"
+    condition = "gan_class"
     data = "biased_00"
     switch_epoch = 0
 
     experiment_name = get_experiment_name(condition, data, switch_epoch)
     exclude_colors = False if condition == "control" else True
 
-    config.global_workspace.latent_dim = 8
     config.dataset.path = f"{ROOT_PATH}/simple_shapes_dataset_{data}"
     config.training.max_steps = 200000
-    config.training.batch_size = 500
+    config.training.batch_size = 2000
     config.seed = 124
 
     apply_custom_init = True
@@ -32,15 +31,15 @@ if __name__ == "__main__":
 
     custom_weights = {
             "cycle_attr_through_v_latents_loss_attr": 1.0,
-            "cycle_attr_through_v_latents_loss_cat": 10.0,
-            "cycle_v_latents_through_attr": 0.0,
+            "cycle_attr_through_v_latents_loss_cat": 1.0,
+            "cycle_v_latents_through_attr": 1.0,
             "demi_cycle_attr": 1.0,
             "demi_cycle_v_latents": 1.0,
             "translation_v_latents_to_attr_loss_attr": 1.0,
-            "translation_v_latents_to_attr_loss_cat": 10.0,
+            "translation_v_latents_to_attr_loss_cat": 1.0,
             "translation_attr_to_v_latents": 0.0,
             "contrastive_loss": 0.0,
-            "shape_loss": 5.0
+            "shape_loss": 0.0
         }
 
     noise = {"mean": 0.0, "std": 0.0}
