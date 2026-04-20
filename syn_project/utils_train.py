@@ -1,10 +1,10 @@
 from datetime import datetime
 import os
 import pickle
-from typing import Any, cast
+from typing import Any, Sequence, cast
 from collections.abc import Mapping
 
-from shimmer import ContrastiveLoss, GWLosses2Domains, GlobalWorkspace2Domains, LatentsDomainGroupsT, LossOutput, ModelModeT, RawDomainGroupsT, SelectionBase, SingleDomainSelection, combine_loss
+from shimmer import ContrastiveLoss, DomainModule, GWLosses2Domains, GlobalWorkspace2Domains, LatentsDomainGroupsT, LossOutput, ModelModeT, RawDomainGroupsT, SelectionBase, SingleDomainSelection, combine_loss
 from shimmer_ssd.logging import batch_to_device
 from shimmer_ssd.modules.domains.visual import VisualLatentDomainModule, mse_loss
 from simple_shapes_dataset import SimpleShapesDataModule, get_default_domains
@@ -271,7 +271,7 @@ class CustomFlexibleCheckpoint(Callback):
 
     def on_train_epoch_end(self, trainer, pl_module):
         self.save_checkpoint(trainer)
-        self.run_color_analysis(trainer, pl_module)
+        #self.run_color_analysis(trainer, pl_module)
 
 class FusionMethod(SelectionBase):
     def __init__(self, n_samples: int = 32, fusion_attr_weight: float = 1.0):
@@ -337,7 +337,7 @@ def get_data_module(project_name,  experiment_name):
     config = training_params["config"]
     exclude_colors = training_params["exclude_colors"]
 
-    domain_classes = get_default_domains(["v_latents", "attr"])
+    domain_classes = get_default_domains(["v_latents", "attr", "cat"])
 
     root_path = get_project_root()
 
@@ -443,7 +443,7 @@ def custom_collate_factory(exclude_colors: bool):
             isinstance(result["attr"], list) and len(result["attr"]) >= 2 and
             isinstance(result["attr"][1], torch.Tensor) and result["attr"][1].size(-1) >= 4):
             # Remove the last 3 values from the tensor
-            result["attr"][1] = result["attr"][1][..., :-3]
+            result["attr"] = result["attr"][1][..., :-3]
         return result
     return custom_collate
 
@@ -482,6 +482,11 @@ def setup_global_workspace(
         ),
         LoadedDomainConfig(
             domain_type=DomainModuleVariant.attr_legacy_no_color if exclude_colors else DomainModuleVariant.attr_legacy,
+            checkpoint_path=checkpoint_path / "domain_attr.ckpt",
+            args=hparams,
+        ),
+        LoadedDomainConfig(
+            domain_type=DomainModuleVariant.cat,
             checkpoint_path=checkpoint_path / "domain_attr.ckpt",
             args=hparams,
         ),
@@ -587,8 +592,7 @@ def setup_data_module(data_path, config:Config, exclude_colors=True):
     """
     from simple_shapes_dataset import SimpleShapesDataModule, get_default_domains
     
-    
-    domain_classes = get_default_domains(["v_latents", "attr"])
+    domain_classes = get_default_domains(["v_latents", "attr", "cat"])
     
     return SimpleShapesDataModule(
         data_path,
@@ -730,7 +734,7 @@ def train_global_workspace(
     # 4. Create trainer
     trainer = Trainer(
         logger=logger,
-        max_epochs=50,
+        max_epochs=200,
         default_root_dir=config.default_root_dir,
         callbacks=callbacks,
         precision=config.training.precision,

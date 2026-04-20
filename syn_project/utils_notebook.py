@@ -172,7 +172,6 @@ def plot_img_comparison_triple_stripes(img_tensor_one: torch.Tensor, img_tensor_
             ax_orig.axis('off')
             ax_dec.axis('off')
 
-    plt.close()
     return fig
 
 def plot_img_comparison(idx, img_tensor_one: torch.Tensor, image_tensor_two: torch.Tensor):

@@ -34,11 +34,14 @@ dependencies = [
     "ipywidgets (>=8.1.8,<9.0.0)",
     "notebook (>=7.5.4,<8.0.0)",
     "scipy (>=1.17.1,<2.0.0)",
-    "shimmer-ssd @ git+https://github.com/AEmanuelli/shimmer-ssd.git",
     "seaborn (>=0.13.2,<0.14.0)",
     "statsmodels (>=0.14.6,<0.15.0)",
     "scikit-posthocs (>=0.12.0,<0.13.0)",
     "scikit-learn (>=1.8.0,<2.0.0)",
+    "deepdiff (>=9.0.0,<10.0.0)",
+    "shimmer @ file:///home/lucas/shimmer",
+    "shimmer-ssd @ file:///home/lucas/shimmer-ssd",
+    "simple-shapes-dataset @ file:///home/lucas/simple_shapes_dataset",
 ]
 
 [tool.poetry.group.dev.dependencies]
@@ -66,6 +69,10 @@ pyqt5 = "^5.15.11"
 ipympl = "^0.9.4"
 
 
+
+[tool.poetry.dependencies]
+simple-shapes-dataset = {develop = true}
+shimmer = {develop = true}
 [tool.ruff]
 target-version = "py311"
 extend-exclude = [
