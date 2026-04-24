@@ -45,6 +45,32 @@ class MyCustomGWLosses(GWLosses2Domains):
         super().__init__(gw_mod, selection_mod, domain_mods, loss_coefs, contrastive_fn)
         self.custom_weights = custom_weights
 
+    def custom_cat_loss(self, domain_latents: LatentsDomainGroupsT, raw_data: RawDomainGroupsT)->LossOutput:
+        self.gw_mod.domain_mods["v_latents"].freeze()
+        self.gw_mod.domain_mods["v_latents"].eval()
+        self.gw_mod.domain_mods["attr"].freeze()
+        self.gw_mod.domain_mods["attr"].eval()
+
+        # je passe de la vision vers les attributs 2
+        gw_latents = self.gw_mod.encode(domain_latents[frozenset({'attr', 'v_latents'})])
+        a2 = self.gw_mod.decode(gw_latents['v_latents'])['attr']
+        a2 = split_softmax_category_attributes(a2)
+
+        # je passe des attributs 2 vers la vision 2
+        unimodal_latents_2 = self.domain_mods['attr'].encode(a2)
+        gw_latents_2 = self.gw_mod.encode({'attr': unimodal_latents_2})
+        v2 = self.gw_mod.decode(gw_latents_2['attr'])['v_latents']
+
+        # je passe de la vision 2 vers les attributs 3
+        unimodal_latents_3 = self.domain_mods['v_latents'].encode(v2)
+        gw_latents_3 = self.gw_mod.encode({'v_latents': unimodal_latents_3})
+        a3 = self.gw_mod.decode(gw_latents_3['v_latents'])['attr']
+        a3 = split_softmax_category_attributes(a3)    
+
+        # je compare à ground truth
+        ground_truth = raw_data[frozenset({'attr', 'v_latents'})]['attr'][0].to(torch.float)
+        prediction = a3[0]
+        return F.mse_loss(prediction, ground_truth)
 
     def demi_cycle_loss(self,
         latent_domains: LatentsDomainGroupsT,
@@ -100,6 +126,10 @@ class MyCustomGWLosses(GWLosses2Domains):
         if "shape_loss" in self.custom_weights.keys() and self.custom_weights["shape_loss"] > 0:
             current_shape_loss = shape_loss(self.gw_mod, domain_latents, raw_data)
             metrics.update({"shape_loss": current_shape_loss.loss})
+
+        if "custom_cat_loss" in self.custom_weights.keys() and self.custom_weights["custom_cat_loss"] > 0:
+            custom_cat = self.custom_cat_loss(domain_latents, raw_data)
+            metrics.update({"custom_cat_loss": custom_cat})
 
         # 1. Calcul des métriques de base
         metrics.update(self.demi_cycle_loss(domain_latents, raw_data))
@@ -271,7 +301,7 @@ class CustomFlexibleCheckpoint(Callback):
 
     def on_train_epoch_end(self, trainer, pl_module):
         self.save_checkpoint(trainer)
-        #self.run_color_analysis(trainer, pl_module)
+        self.run_color_analysis(trainer, pl_module)
 
 class FusionMethod(SelectionBase):
     def __init__(self, n_samples: int = 32, fusion_attr_weight: float = 1.0):
@@ -332,12 +362,15 @@ def get_global_workspace(project_name, experiment_name, checkpoint_path=None, ep
 
     return global_workspace
 
-def get_data_module(project_name,  experiment_name):
+def get_data_module(project_name,  experiment_name, nb_module=2):
     training_params = load_training_params_pickle(project_name,  experiment_name)
     config = training_params["config"]
     exclude_colors = training_params["exclude_colors"]
 
-    domain_classes = get_default_domains(["v_latents", "attr", "cat"])
+    if nb_module == 3:
+        domain_classes = get_default_domains(["v_latents", "attr", "cat"])
+    else:
+        domain_classes = get_default_domains(["v_latents", "attr"])
 
     root_path = get_project_root()
 
@@ -430,7 +463,7 @@ def get_experiment_name(condition, data, switch_epoch):
 
     return experiment_name
 
-def custom_collate_factory(exclude_colors: bool):
+def custom_collate_factory(exclude_colors: bool, nb_module=2):
     """Returns a collate function that optionally removes color info."""
     if not exclude_colors:
         return default_collate
@@ -443,7 +476,13 @@ def custom_collate_factory(exclude_colors: bool):
             isinstance(result["attr"], list) and len(result["attr"]) >= 2 and
             isinstance(result["attr"][1], torch.Tensor) and result["attr"][1].size(-1) >= 4):
             # Remove the last 3 values from the tensor
-            result["attr"] = result["attr"][1][..., :-3]
+
+            if nb_module == 3:
+                result["attr"] = result["attr"][1][..., :-3]
+
+            else:
+                result["attr"][1] = result["attr"][1][..., :-3]
+
         return result
     return custom_collate
 
@@ -454,7 +493,8 @@ def setup_global_workspace(
         load_from_checkpoint=True,
         gw_checkpoint_path=None,
         custom_weights=None,
-        noise=None):
+        noise=None,
+        nb_module=2):
     """
     Set up the global workspace model.
     
@@ -475,22 +515,36 @@ def setup_global_workspace(
     root_path = get_project_root()
     # Set up domain configurations
     checkpoint_path = Path(f"{root_path}/checkpoints")
-    domains = [
-        LoadedDomainConfig(
-            domain_type=DomainModuleVariant.v_latents,
-            checkpoint_path= checkpoint_path / "domain_v.ckpt"
-        ),
-        LoadedDomainConfig(
-            domain_type=DomainModuleVariant.attr_legacy_no_color if exclude_colors else DomainModuleVariant.attr_legacy,
-            checkpoint_path=checkpoint_path / "domain_attr.ckpt",
-            args=hparams,
-        ),
-        LoadedDomainConfig(
-            domain_type=DomainModuleVariant.cat,
-            checkpoint_path=checkpoint_path / "domain_attr.ckpt",
-            args=hparams,
-        ),
-    ]
+
+    if nb_module == 3:
+        domains = [
+            LoadedDomainConfig(
+                domain_type=DomainModuleVariant.v_latents,
+                checkpoint_path= checkpoint_path / "domain_v.ckpt"
+            ),
+            LoadedDomainConfig(
+                domain_type=DomainModuleVariant.attr_legacy_no_color if exclude_colors else DomainModuleVariant.attr_legacy,
+                checkpoint_path=checkpoint_path / "domain_attr.ckpt",
+                args=hparams,
+            ),
+            LoadedDomainConfig(
+                domain_type=DomainModuleVariant.cat,
+                checkpoint_path=checkpoint_path / "domain_attr.ckpt",
+                args=hparams,
+            ),
+        ]
+    else:
+        domains = [
+            LoadedDomainConfig(
+                domain_type=DomainModuleVariant.v_latents,
+                checkpoint_path= checkpoint_path / "domain_v.ckpt"
+            ),
+            LoadedDomainConfig(
+                domain_type=DomainModuleVariant.attr_legacy_no_color if exclude_colors else DomainModuleVariant.attr_legacy,
+                checkpoint_path=checkpoint_path / "domain_attr.ckpt",
+                args=hparams,
+            ),
+        ]
     
     # Create scheduler function
     def get_scheduler(optimizer: Optimizer, scheduler_type: str = "onecycle"):
@@ -580,7 +634,7 @@ def setup_global_workspace(
     
     return global_workspace, domain_modules
 
-def setup_data_module(data_path, config:Config, exclude_colors=True):
+def setup_data_module(data_path, config:Config, exclude_colors=True, nb_module=2):
     """
     Set up the data module for training.
     
@@ -592,7 +646,11 @@ def setup_data_module(data_path, config:Config, exclude_colors=True):
     """
     from simple_shapes_dataset import SimpleShapesDataModule, get_default_domains
     
-    domain_classes = get_default_domains(["v_latents", "attr", "cat"])
+    domain_classes = {}
+    if nb_module == 3:
+        domain_classes = get_default_domains(["v_latents", "attr", "cat"])
+    else:
+        domain_classes = get_default_domains(["v_latents", "attr"])
     
     return SimpleShapesDataModule(
         data_path,
@@ -734,7 +792,7 @@ def train_global_workspace(
     # 4. Create trainer
     trainer = Trainer(
         logger=logger,
-        max_epochs=200,
+        max_epochs=600,
         default_root_dir=config.default_root_dir,
         callbacks=callbacks,
         precision=config.training.precision,
@@ -764,7 +822,10 @@ def get_data_translated(global_workspace, train_samples, n_samples=32, fusion_at
 
     train_images = visual_module.decode_images(train_paired_samples["v_latents"]).detach().cpu()
     
-    train_attr = torch.cat((train_paired_samples["attr"][0], train_paired_samples["attr"][1]), dim=1).detach().cpu()
+    if type(train_paired_samples["attr"]) == list:
+        train_attr = torch.cat((train_paired_samples["attr"][0], train_paired_samples["attr"][1]), dim=1).detach().cpu()
+    else:
+        train_attr = train_paired_samples["attr"].detach().cpu()
 
     unimodal_latents = global_workspace.encode_domains(train_samples)
     gw_latents = global_workspace.encode(unimodal_latents)

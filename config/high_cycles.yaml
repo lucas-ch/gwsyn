@@ -1,5 +1,5 @@
 global_workspace:
-    latent_dim: 12  
+    latent_dim: 12
 
     loss_coefficients:
         cycles: 10
@@ -7,17 +7,20 @@ global_workspace:
         demi_cycles: 1
         translations: 1
     encoders:
-        hidden_dim: 256
+        hidden_dim:
+            attr: 8
+            attr_legacy_no_color: 8
+            v_latents: 256
+            cat: 8
         n_layers: 2
 
     decoders:
         hidden_dim:
-            attr: 256
-            attr_legacy_no_color: 256
-            v_latents: 256
-            cat: 256
+            attr: 8
+            attr_legacy_no_color: 8
+            v_latents: 64
+            cat: 8
         n_layers: 2
-
 
 training:
     optim:

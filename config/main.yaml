@@ -33,12 +33,12 @@ domain_proportions:
         proportion: 1.0
     -   domains: ["v"]
         proportion: 1.0
-    -   domains: ["cat"]
-        proportion: 1.0
+    # -   domains: ["cat"]
+    #     proportion: 1.0
     -   domains: ["v", "attr"]
         proportion: 1.0
-    -   domains: ["v", "cat"]
-        proportion: 1.0
+    # -   domains: ["v", "cat"]
+    #     proportion: 1.0
 
 
 

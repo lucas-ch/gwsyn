@@ -633,6 +633,32 @@ def plot_original_translated_comparison(original_images, result_images, max_imag
 
     return fig
 
+def plot_original_color_comparison(original_images, colors_tensor, max_images=30):
+    num_to_show = min(len(original_images), len(colors_tensor), max_images)
+    orig_subset = original_images[:num_to_show]
+    colors_subset = colors_tensor[:num_to_show]
+    
+    h, w = orig_subset.shape[2], orig_subset.shape[3]
+
+    color_squares = colors_subset.view(num_to_show, 3, 1, 1).expand(-1, -1, h, w)
+    color_squares = color_squares / 255.0
+    
+    grid_orig = get_grid_numpy(orig_subset)
+    grid_color = get_grid_numpy(color_squares)
+
+    # Affichage
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4)) 
+    ax1.imshow(grid_orig)
+    ax1.set_title("Originales")
+    ax1.axis('off')
+
+    ax2.imshow(grid_color)
+    ax2.set_title("Couleurs")
+    ax2.axis('off')
+
+    fig.subplots_adjust(top=0.95, bottom=0.05, right=0.98, left=0.02, wspace=0.05)
+    return fig
+
 def get_samples_rgb(
     data_translated: Dict[str, any], 
     type: Literal['training', 'decoded', 'decoded_edge'] = 'training'
@@ -650,22 +676,18 @@ def get_samples_rgb(
     Returns:
         A vertically stacked NumPy array of all detected pixel colors.
     """
-    # Generate binary masks for shape localization
-    masks = get_mask_from_shapes(data_translated["train_images"])
-    masks_decoded = get_mask_from_shapes(data_translated["images_decoded"])
+    if type == 'training':
+        masks = get_mask_from_shapes(data_translated["train_images"])
+        colors_from_training_img = get_color_from_images(data_translated["train_images"], masks)
+        colors_np = np.vstack(colors_from_training_img)
+        return colors_np
 
-    # Generate a specific mask for colorful pixels (excluding grayscale background/noise)
+    masks_decoded = get_mask_from_shapes(data_translated["images_decoded"])
     colors_masks = get_color_masks(data_translated["images_decoded"], 0, 0, 254)
 
-    # Extract pixel values (RGB) located within the defined masks
-    colors_from_training_img = get_color_from_images(data_translated["train_images"], masks)
     colors_from_decoded_img = get_color_from_images(data_translated["images_decoded"], masks_decoded)
     colors_from_decoded_img_edge = get_color_from_images(data_translated["images_decoded"], colors_masks)
 
-    # Default selection: Original training colors
-    colors_np = np.vstack(colors_from_training_img)
-    
-    # Switch output based on the 'type' argument
     if type == "decoded":
         colors_np = np.vstack(colors_from_decoded_img)
     elif type == "decoded_edge":

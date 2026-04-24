@@ -389,3 +389,38 @@ def total_silence():
                     yield
                 finally:
                     plt.ion()
+
+
+def get_n_per_category(source_tensor, current_attr, n_per_cat=10):
+    """
+    Retourne les n premiers éléments de source_tensor pour chaque catégorie 
+    définie dans current_attr.
+    
+    Args:
+        source_tensor: Le tenseur d'où on extrait les données (ex: des images ou latents)
+        current_attr: Le tenseur de catégories (one-hot, ex: [Batch, 3])
+        n_per_cat: Nombre d'éléments à extraire par catégorie
+    """
+    # 1. Convertir le one-hot en indices (0, 1, 2)
+    labels = current_attr.argmax(dim=-1)
+    
+    # 2. Trouver les indices pour chaque classe
+    indices_list = []
+    num_classes = current_attr.shape[-1]
+    
+    for i in range(num_classes):
+        # On récupère les indices où la classe est i
+        indices = (labels == i).nonzero(as_tuple=True)[0]
+        
+        if len(indices) < n_per_cat:
+            print(f"Warning: Seulement {len(indices)} éléments trouvés pour la classe {i}")
+            indices_list.append(indices)
+        else:
+            # On ne garde que les n premiers
+            indices_list.append(indices[:n_per_cat])
+    
+    # 3. Concaténer tous les indices sélectionnés
+    all_indices = torch.cat(indices_list)
+    
+    # 4. Retourner le sous-ensemble du tenseur source
+    return source_tensor[all_indices]

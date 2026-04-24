@@ -6,6 +6,8 @@ from shimmer_ssd.modules.domains.visual import VisualLatentDomainModule
 import torch
 import torch.nn.functional as F
 
+from syn_project.utils_notebook import split_softmax_category_attributes
+
 
 def get_mask(images: torch.Tensor, temperature: float = 30.0) -> torch.Tensor:
     """
