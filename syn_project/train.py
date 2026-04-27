@@ -7,10 +7,10 @@ torch.autograd.set_detect_anomaly(True)
 
 if __name__ == "__main__":
 
-    config = load_config(f"{ROOT_PATH}/config", use_cli=False, load_files=["high_cycles.yaml"])
+    config = load_config(f"{ROOT_PATH}/config", use_cli=False, load_files=["color_mod.yaml"])
     
     project_name = "syn"
-    condition = "try_3"
+    condition = "debug_color"
     data = "biased_00"
     switch_epoch = 0
 
@@ -29,14 +29,12 @@ if __name__ == "__main__":
     }
 
     custom_weights = {
-        'cycle_attr_through_v_latents_loss_attr': 0.0,
-        'cycle_attr_through_v_latents_loss_cat': 1.0,
-        'cycle_v_latents_through_attr': 0.0,
-        'demi_cycle_attr': 1.0,
+        'cycle_v_latents_through_color': 0.0,
+        'cycle_color_through_v_latents': 1.0,
+        'demi_cycle_color': 1.0,
         'demi_cycle_v_latents': 1.0,
-        'translation_v_latents_to_attr_loss_attr': 0.0,
-        'translation_v_latents_to_attr_loss_cat': 1.0,
-        'translation_attr_to_v_latents': 0.0,
+        'translation_v_latents_to_color': 0.0,
+        'translation_color_to_v_latents': 0.0,
         'contrastive_loss': 0.0,
         }
 

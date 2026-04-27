@@ -27,18 +27,4 @@ domain_data_args:
         presaved_path: domain_v.npy
 
 
-# Proportion used for each group of domain
-domain_proportions: 
-    -   domains: ["attr"]
-        proportion: 1.0
-    -   domains: ["v"]
-        proportion: 1.0
-    # -   domains: ["cat"]
-    #     proportion: 1.0
-    -   domains: ["v", "attr"]
-        proportion: 1.0
-    # -   domains: ["v", "cat"]
-    #     proportion: 1.0
-
-
 

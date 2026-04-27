@@ -52,14 +52,14 @@ logging:
 
 
 domains:
-    - checkpoint_path: "#{default_root_dir}/checkpoints/pretrained/domain_attr.ckpt"
-      domain_type: attr
-      args:
-          n_unpaired: "#{domain_data_args.attr.n_unpaired}"
+    # - checkpoint_path: "#{default_root_dir}/checkpoints/pretrained/domain_attr.ckpt"
+    #   domain_type: attr
+    #   args:
+    #       n_unpaired: "#{domain_data_args.attr.n_unpaired}"
     - checkpoint_path: "#{default_root_dir}/pretrained/domain_v.ckpt"
       domain_type: v_latents
-    # - checkpoint_path: "#{default_root_dir}/checkpoints/pretrained/domain_attr.ckpt"
-    #   domain_type: color
+    - checkpoint_path: "#{default_root_dir}/checkpoints/pretrained/domain_attr.ckpt"
+      domain_type: color
 
 domain_data_args:
     v_latents:
@@ -72,8 +72,19 @@ domain_proportions:
     -   domains: ["v"]
         proportion: 1.0
 
-    -   domains: ["attr"]
+    -   domains: ["color"]
         proportion: 1.0
-    -   domains: ["v", "attr"]
+    -   domains: ["v", "color"]
+        proportion: 1.0
+
+    # -   domains: ["attr"]
+    #     proportion: 1.0
+    # -   domains: ["v", "attr"]
+    # -   domains: ["cat"]
+    #     proportion: 1.0
+    #    proportion: 1.0
+    # -   domains: ["v", "cat"]
+    #     proportion: 1.0
+
 
 output_dir: "./base_params"

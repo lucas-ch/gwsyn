@@ -45,76 +45,6 @@ class MyCustomGWLosses(GWLosses2Domains):
         super().__init__(gw_mod, selection_mod, domain_mods, loss_coefs, contrastive_fn)
         self.custom_weights = custom_weights
 
-    def custom_cat_loss(self, domain_latents: LatentsDomainGroupsT, raw_data: RawDomainGroupsT)->LossOutput:
-        self.gw_mod.domain_mods["v_latents"].freeze()
-        self.gw_mod.domain_mods["v_latents"].eval()
-        self.gw_mod.domain_mods["attr"].freeze()
-        self.gw_mod.domain_mods["attr"].eval()
-
-        # je passe de la vision vers les attributs 2
-        gw_latents = self.gw_mod.encode(domain_latents[frozenset({'attr', 'v_latents'})])
-        a2 = self.gw_mod.decode(gw_latents['v_latents'])['attr']
-        a2 = split_softmax_category_attributes(a2)
-
-        # je passe des attributs 2 vers la vision 2
-        unimodal_latents_2 = self.domain_mods['attr'].encode(a2)
-        gw_latents_2 = self.gw_mod.encode({'attr': unimodal_latents_2})
-        v2 = self.gw_mod.decode(gw_latents_2['attr'])['v_latents']
-
-        # je passe de la vision 2 vers les attributs 3
-        unimodal_latents_3 = self.domain_mods['v_latents'].encode(v2)
-        gw_latents_3 = self.gw_mod.encode({'v_latents': unimodal_latents_3})
-        a3 = self.gw_mod.decode(gw_latents_3['v_latents'])['attr']
-        a3 = split_softmax_category_attributes(a3)    
-
-        # je compare à ground truth
-        ground_truth = raw_data[frozenset({'attr', 'v_latents'})]['attr'][0].to(torch.float)
-        prediction = a3[0]
-        return F.mse_loss(prediction, ground_truth)
-
-    def demi_cycle_loss(self,
-        latent_domains: LatentsDomainGroupsT,
-        raw_data: RawDomainGroupsT,
-    ) -> dict[str, torch.Tensor]:
-        """
-        Computes the demi-cycle loss.
-        This return multiple metrics:
-            * `demi_cycle_{domain_name}` with the demi-cycle of a particular domain;
-            * `demi_cycle_{domain_name}_{metric}` with additional metrics provided by
-                the domain_mod's `compute_dcy_loss` output;
-            * `demi_cycles` with the average value of all `demi_cycle_{domain_name}` values.
-        Args:
-            gw_mod (`shimmer.modules.gw_module.GWModuleBase`): The GWModule to use
-            domain_mods (`Mapping[str, DomainModule]`): the domain modules
-            latent_domains (`shimmer.types.LatentsDomainGroupsT`): the latent unimodal
-                groups
-            raw_data (`RawDomainGroupsT`): raw input data
-        Returns:
-            `dict[str, torch.Tensor]`: a dict of metrics.
-        """
-        losses: dict[str, torch.Tensor] = {}
-        metrics: dict[str, torch.Tensor] = {}
-        for domains, latents in latent_domains.items():
-            if len(domains) > 1:
-                continue
-            domain_name = next(iter(domains))
-
-            domain_mod = self.domain_mods[domain_name]
-            gw_latents = self.gw_mod.encode(latents)
-            x_recons = self.gw_mod.decode(gw_latents[domain_name])[domain_name]
-            loss_output = domain_mod.compute_dcy_loss(
-                x_recons, latents[domain_name], raw_data[domains][domain_name]
-            )
-            if loss_output is None:
-                continue
-            losses[f"demi_cycle_{domain_name}"] = loss_output.loss
-            metrics.update(
-                {f"demi_cycle_{domain_name}_{k}": v for k, v in loss_output.metrics.items()}
-            )
-        losses["demi_cycles"] = torch.stack(list(losses.values()), dim=0).mean()
-        losses.update(metrics)
-        return losses
-
     def step(
         self,
         raw_data: RawDomainGroupsT,
@@ -301,7 +231,7 @@ class CustomFlexibleCheckpoint(Callback):
 
     def on_train_epoch_end(self, trainer, pl_module):
         self.save_checkpoint(trainer)
-        self.run_color_analysis(trainer, pl_module)
+#        self.run_color_analysis(trainer, pl_module)
 
 class FusionMethod(SelectionBase):
     def __init__(self, n_samples: int = 32, fusion_attr_weight: float = 1.0):
@@ -332,7 +262,7 @@ def get_training_params(project_name, experiment_name):
     training_params = load_training_params_pickle(project_name,  experiment_name)
     return training_params
 
-def get_global_workspace(project_name, experiment_name, checkpoint_path=None, epoch=0):
+def get_global_workspace(project_name, experiment_name, checkpoint_path=None, epoch=0, nb_module=3):
     root_path = get_project_root()
 
     training_params = get_training_params(project_name,  experiment_name)
@@ -354,7 +284,8 @@ def get_global_workspace(project_name, experiment_name, checkpoint_path=None, ep
         exclude_colors,
         apply_custom_init,
         load_from_checkpoint = True,
-        gw_checkpoint_path = gw_checkpoint_path
+        gw_checkpoint_path = gw_checkpoint_path,
+        nb_module = nb_module
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -362,13 +293,13 @@ def get_global_workspace(project_name, experiment_name, checkpoint_path=None, ep
 
     return global_workspace
 
-def get_data_module(project_name,  experiment_name, nb_module=2):
+def get_data_module(project_name,  experiment_name, nb_module=3):
     training_params = load_training_params_pickle(project_name,  experiment_name)
     config = training_params["config"]
     exclude_colors = training_params["exclude_colors"]
 
     if nb_module == 3:
-        domain_classes = get_default_domains(["v_latents", "attr", "cat"])
+        domain_classes = get_default_domains(["v_latents", "color"])
     else:
         domain_classes = get_default_domains(["v_latents", "attr"])
 
@@ -386,7 +317,7 @@ def get_data_module(project_name,  experiment_name, nb_module=2):
         config.training.batch_size,
         seed=config.seed,
         domain_args=config.domain_data_args,
-        collate_fn=custom_collate_factory(exclude_colors=exclude_colors),
+        collate_fn=custom_collate_factory(exclude_colors=exclude_colors, nb_module=nb_module),
     )
 
     return data_module
@@ -463,7 +394,7 @@ def get_experiment_name(condition, data, switch_epoch):
 
     return experiment_name
 
-def custom_collate_factory(exclude_colors: bool, nb_module=2):
+def custom_collate_factory(exclude_colors: bool, nb_module=3):
     """Returns a collate function that optionally removes color info."""
     if not exclude_colors:
         return default_collate
@@ -494,7 +425,7 @@ def setup_global_workspace(
         gw_checkpoint_path=None,
         custom_weights=None,
         noise=None,
-        nb_module=2):
+        nb_module=3):
     """
     Set up the global workspace model.
     
@@ -522,13 +453,13 @@ def setup_global_workspace(
                 domain_type=DomainModuleVariant.v_latents,
                 checkpoint_path= checkpoint_path / "domain_v.ckpt"
             ),
+            # LoadedDomainConfig(
+            #     domain_type=DomainModuleVariant.attr_legacy_no_color if exclude_colors else DomainModuleVariant.attr_legacy,
+            #     checkpoint_path=checkpoint_path / "domain_attr.ckpt",
+            #     args=hparams,
+            # ),
             LoadedDomainConfig(
-                domain_type=DomainModuleVariant.attr_legacy_no_color if exclude_colors else DomainModuleVariant.attr_legacy,
-                checkpoint_path=checkpoint_path / "domain_attr.ckpt",
-                args=hparams,
-            ),
-            LoadedDomainConfig(
-                domain_type=DomainModuleVariant.cat,
+                domain_type=DomainModuleVariant.color,
                 checkpoint_path=checkpoint_path / "domain_attr.ckpt",
                 args=hparams,
             ),
@@ -634,7 +565,7 @@ def setup_global_workspace(
     
     return global_workspace, domain_modules
 
-def setup_data_module(data_path, config:Config, exclude_colors=True, nb_module=2):
+def setup_data_module(data_path, config:Config, exclude_colors=True, nb_module=3):
     """
     Set up the data module for training.
     
@@ -648,7 +579,7 @@ def setup_data_module(data_path, config:Config, exclude_colors=True, nb_module=2
     
     domain_classes = {}
     if nb_module == 3:
-        domain_classes = get_default_domains(["v_latents", "attr", "cat"])
+        domain_classes = get_default_domains(["v_latents", "color"])
     else:
         domain_classes = get_default_domains(["v_latents", "attr"])
     
@@ -660,7 +591,7 @@ def setup_data_module(data_path, config:Config, exclude_colors=True, nb_module=2
         num_workers=config.training.num_workers,
         seed=config.seed,
         domain_args=config.domain_data_args,
-        collate_fn=custom_collate_factory(exclude_colors),
+        collate_fn=custom_collate_factory(exclude_colors, nb_module=nb_module),
     )
 
 def setup_logger_and_callbacks(config, 
