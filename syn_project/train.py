@@ -10,7 +10,7 @@ if __name__ == "__main__":
     config = load_config(f"{ROOT_PATH}/config", use_cli=False, load_files=["color_mod.yaml"])
     
     project_name = "syn"
-    condition = "debug_color"
+    condition = "seed_124"
     data = "biased_00"
     switch_epoch = 0
 
@@ -19,7 +19,7 @@ if __name__ == "__main__":
 
     config.dataset.path = f"{ROOT_PATH}/simple_shapes_dataset_{data}"
     config.training.batch_size = 2056
-    config.seed = 0
+    config.seed = 124
 
     apply_custom_init = True
 
@@ -29,13 +29,15 @@ if __name__ == "__main__":
     }
 
     custom_weights = {
-        'cycle_v_latents_through_color': 0.0,
-        'cycle_color_through_v_latents': 1.0,
+        'cycle_color_through_v_latents': 0.0,
+        'demi_cycle_attr': 1.0,
         'demi_cycle_color': 1.0,
         'demi_cycle_v_latents': 1.0,
-        'translation_v_latents_to_color': 0.0,
+        'translation_v_latents_to_color': 1.0,
+        'translation_attr_to_v_latents': 1.0,
         'translation_color_to_v_latents': 0.0,
-        'contrastive_loss': 0.0,
+        'cycle_attr_through_color_loss_cat': 1.0,
+        'attr_color_loss': 1.0
         }
 
     noise = {"mean": 0.0, "std": 0.0}

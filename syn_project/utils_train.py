@@ -45,6 +45,22 @@ class MyCustomGWLosses(GWLosses2Domains):
         super().__init__(gw_mod, selection_mod, domain_mods, loss_coefs, contrastive_fn)
         self.custom_weights = custom_weights
 
+    def attr_color_loss(
+        self,
+        latent_domains: LatentsDomainGroupsT,
+        raw_data: RawDomainGroupsT,
+    ) -> LossOutput:
+
+        latents_source = latent_domains[frozenset({'color', 'v_latents', 'attr'})]
+        gw_latents = self.gw_mod.encode(latents_source)
+        z = 0.5*gw_latents['color'] + 0.5*gw_latents['attr']
+
+        prediction = self.gw_mod.decode(z, domains={'v_latents'})['v_latents']
+
+        loss = LossOutput(F.mse_loss(prediction, latents_source['v_latents'], reduction="mean"))
+
+        return loss
+
     def step(
         self,
         raw_data: RawDomainGroupsT,
@@ -57,15 +73,14 @@ class MyCustomGWLosses(GWLosses2Domains):
             current_shape_loss = shape_loss(self.gw_mod, domain_latents, raw_data)
             metrics.update({"shape_loss": current_shape_loss.loss})
 
-        if "custom_cat_loss" in self.custom_weights.keys() and self.custom_weights["custom_cat_loss"] > 0:
-            custom_cat = self.custom_cat_loss(domain_latents, raw_data)
-            metrics.update({"custom_cat_loss": custom_cat})
+        if "attr_color_loss" in self.custom_weights.keys() and self.custom_weights["attr_color_loss"] > 0:
+            current_attr_color_loss = self.attr_color_loss(domain_latents, raw_data)
+            metrics.update({"attr_color_loss": current_attr_color_loss.loss})
 
         # 1. Calcul des métriques de base
         metrics.update(self.demi_cycle_loss(domain_latents, raw_data))
         metrics.update(self.cycle_loss(domain_latents, raw_data))
         metrics.update(self.translation_loss(domain_latents, raw_data))
-        metrics.update(self.contrastive_loss(domain_latents))
 
         custom_weights = self.custom_weights
 
@@ -299,7 +314,7 @@ def get_data_module(project_name,  experiment_name, nb_module=3):
     exclude_colors = training_params["exclude_colors"]
 
     if nb_module == 3:
-        domain_classes = get_default_domains(["v_latents", "color"])
+        domain_classes = get_default_domains(["v_latents", "color", "attr"])
     else:
         domain_classes = get_default_domains(["v_latents", "attr"])
 
@@ -317,7 +332,7 @@ def get_data_module(project_name,  experiment_name, nb_module=3):
         config.training.batch_size,
         seed=config.seed,
         domain_args=config.domain_data_args,
-        collate_fn=custom_collate_factory(exclude_colors=exclude_colors, nb_module=nb_module),
+        collate_fn=custom_collate_factory(exclude_colors=exclude_colors),
     )
 
     return data_module
@@ -394,7 +409,7 @@ def get_experiment_name(condition, data, switch_epoch):
 
     return experiment_name
 
-def custom_collate_factory(exclude_colors: bool, nb_module=3):
+def custom_collate_factory(exclude_colors: bool):
     """Returns a collate function that optionally removes color info."""
     if not exclude_colors:
         return default_collate
@@ -408,11 +423,7 @@ def custom_collate_factory(exclude_colors: bool, nb_module=3):
             isinstance(result["attr"][1], torch.Tensor) and result["attr"][1].size(-1) >= 4):
             # Remove the last 3 values from the tensor
 
-            if nb_module == 3:
-                result["attr"] = result["attr"][1][..., :-3]
-
-            else:
-                result["attr"][1] = result["attr"][1][..., :-3]
+            result["attr"][1] = result["attr"][1][..., :-3]
 
         return result
     return custom_collate
@@ -453,11 +464,11 @@ def setup_global_workspace(
                 domain_type=DomainModuleVariant.v_latents,
                 checkpoint_path= checkpoint_path / "domain_v.ckpt"
             ),
-            # LoadedDomainConfig(
-            #     domain_type=DomainModuleVariant.attr_legacy_no_color if exclude_colors else DomainModuleVariant.attr_legacy,
-            #     checkpoint_path=checkpoint_path / "domain_attr.ckpt",
-            #     args=hparams,
-            # ),
+            LoadedDomainConfig(
+                domain_type=DomainModuleVariant.attr_legacy_no_color if exclude_colors else DomainModuleVariant.attr_legacy,
+                checkpoint_path=checkpoint_path / "domain_attr.ckpt",
+                args=hparams,
+            ),
             LoadedDomainConfig(
                 domain_type=DomainModuleVariant.color,
                 checkpoint_path=checkpoint_path / "domain_attr.ckpt",
@@ -579,7 +590,7 @@ def setup_data_module(data_path, config:Config, exclude_colors=True, nb_module=3
     
     domain_classes = {}
     if nb_module == 3:
-        domain_classes = get_default_domains(["v_latents", "color"])
+        domain_classes = get_default_domains(["v_latents", "color", "attr"])
     else:
         domain_classes = get_default_domains(["v_latents", "attr"])
     
@@ -591,7 +602,7 @@ def setup_data_module(data_path, config:Config, exclude_colors=True, nb_module=3
         num_workers=config.training.num_workers,
         seed=config.seed,
         domain_args=config.domain_data_args,
-        collate_fn=custom_collate_factory(exclude_colors, nb_module=nb_module),
+        collate_fn=custom_collate_factory(exclude_colors),
     )
 
 def setup_logger_and_callbacks(config, 
