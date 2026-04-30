@@ -240,12 +240,12 @@ def analyze_attribute_drift(original: torch.Tensor, reconstructed: torch.Tensor)
 def get_attr_orig_reconstr(global_workspace, samples):
 
     # on regarde l'ecart entre les attributs originaux et les attributs encodés puis décodés
-    attribut = samples[frozenset(["v_latents", "attr"])]["attr"]
+    attribut = samples[frozenset(["attr"])]["attr"]
     original_attributes = torch.cat((attribut[0], attribut[1]), dim=1)
 
     unimodal_latents = global_workspace.encode_domains(samples)
     gw_latents = global_workspace.encode(unimodal_latents)
-    decoded_attr = global_workspace.decode(gw_latents[frozenset({'attr','v_latents'})])['attr']['attr'].detach()
+    decoded_attr = global_workspace.decode(gw_latents[frozenset({'attr'})])['attr']['attr'].detach()
     reconstructed_attr = split_softmax_category_attributes(decoded_attr)
     reconstructed_attr_col = torch.cat((reconstructed_attr[0], reconstructed_attr[1]), dim=1)
 
@@ -332,10 +332,13 @@ def generate_summary_table(correlation_stats, constrast_stats, training_stats):
 
 def get_stats(project_name, experiment_name, n_samples_test, split="test"):
 
-    global_workspace = get_global_workspace(project_name, experiment_name)
-    data_module = get_data_module(project_name,  experiment_name)
+    modules = get_setup_modules(project_name, experiment_name)
+    has_color_module = 'color' in modules
+
+    global_workspace = get_global_workspace(project_name, experiment_name, modules=modules)
+    data_module = get_data_module(project_name,  experiment_name, modules=modules)
     test_samples = get_data_samples(data_module, n_samples_test, split= split)
-    data_translated = get_data_translated(global_workspace, test_samples, n_samples_test)
+    data_translated = get_data_translated(global_workspace, test_samples, n_samples_test, has_color_module=has_color_module)
 
     colors_np = get_samples_rgb(data_translated, "decoded_edge")
     categories_indices_train = get_categories_indices(data_translated, 'train_attr')

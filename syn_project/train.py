@@ -7,19 +7,23 @@ torch.autograd.set_detect_anomaly(True)
 
 if __name__ == "__main__":
 
-    config = load_config(f"{ROOT_PATH}/config", use_cli=False, load_files=["color_mod.yaml"])
-    
     project_name = "syn"
-    condition = "seed_124"
+    condition = "debug"
     data = "biased_00"
     switch_epoch = 0
 
+    modules = ['attr', 'color', 'v_latents']
+
+    config = load_config(f"{ROOT_PATH}/config", use_cli=False, load_files=["high_cycles.yaml"])
+    if len(modules) > 2:
+        config = load_config(f"{ROOT_PATH}/config", use_cli=False, load_files=["color_mod.yaml"])
+                
     experiment_name = get_experiment_name(condition, data, switch_epoch)
     exclude_colors = False if condition == "control" else True
 
     config.dataset.path = f"{ROOT_PATH}/simple_shapes_dataset_{data}"
     config.training.batch_size = 2056
-    config.seed = 124
+    config.seed = 0
 
     apply_custom_init = True
 
@@ -36,6 +40,7 @@ if __name__ == "__main__":
         'translation_v_latents_to_color': 1.0,
         'translation_attr_to_v_latents': 1.0,
         'translation_color_to_v_latents': 0.0,
+        'translation_v_latents_to_attr': 1.0,
         'cycle_attr_through_color_loss_cat': 1.0,
         'attr_color_loss': 1.0
         }
@@ -49,7 +54,8 @@ if __name__ == "__main__":
         "config": config,
         "custom_hparams": custom_hparams,
         "swith_epoch": switch_epoch,
-        "custom_weights": custom_weights
+        "custom_weights": custom_weights,
+        "modules": modules
     }
 
     save_training_params_pickle(log_training_params, project_name, experiment_name)
@@ -64,5 +70,6 @@ if __name__ == "__main__":
         load_from_checkpoint=False,
         switch_epoch=switch_epoch,
         custom_weights=custom_weights,
-        noise=noise
+        noise=noise,
+        modules=modules
     )

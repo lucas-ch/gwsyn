@@ -277,7 +277,16 @@ def get_training_params(project_name, experiment_name):
     training_params = load_training_params_pickle(project_name,  experiment_name)
     return training_params
 
-def get_global_workspace(project_name, experiment_name, checkpoint_path=None, epoch=0, nb_module=3):
+def get_setup_modules(project_name, experiment_name):
+    training_params = get_training_params(project_name, experiment_name)
+    modules = ['attr', 'v_latents']
+    if 'good' in experiment_name:
+        modules = ['attr', 'v_latents', 'color']
+    if 'modules' in training_params.keys():
+        modules = training_params['modules']
+    return modules
+
+def get_global_workspace(project_name, experiment_name, checkpoint_path=None, epoch=0, modules=['attr', 'v_latents']):
     root_path = get_project_root()
 
     training_params = get_training_params(project_name,  experiment_name)
@@ -300,7 +309,7 @@ def get_global_workspace(project_name, experiment_name, checkpoint_path=None, ep
         apply_custom_init,
         load_from_checkpoint = True,
         gw_checkpoint_path = gw_checkpoint_path,
-        nb_module = nb_module
+        modules = modules
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -308,15 +317,12 @@ def get_global_workspace(project_name, experiment_name, checkpoint_path=None, ep
 
     return global_workspace
 
-def get_data_module(project_name,  experiment_name, nb_module=3):
+def get_data_module(project_name,  experiment_name, modules=['attr', 'v_latents']):
     training_params = load_training_params_pickle(project_name,  experiment_name)
     config = training_params["config"]
     exclude_colors = training_params["exclude_colors"]
 
-    if nb_module == 3:
-        domain_classes = get_default_domains(["v_latents", "color", "attr"])
-    else:
-        domain_classes = get_default_domains(["v_latents", "attr"])
+    domain_classes = get_default_domains(modules)
 
     root_path = get_project_root()
 
@@ -436,7 +442,7 @@ def setup_global_workspace(
         gw_checkpoint_path=None,
         custom_weights=None,
         noise=None,
-        nb_module=3):
+        modules=['attr', 'v_latents']):
     """
     Set up the global workspace model.
     
@@ -458,35 +464,30 @@ def setup_global_workspace(
     # Set up domain configurations
     checkpoint_path = Path(f"{root_path}/checkpoints")
 
-    if nb_module == 3:
-        domains = [
-            LoadedDomainConfig(
-                domain_type=DomainModuleVariant.v_latents,
-                checkpoint_path= checkpoint_path / "domain_v.ckpt"
-            ),
-            LoadedDomainConfig(
+    domains = []
+    if 'attr' in modules:
+        domain_config = LoadedDomainConfig(
                 domain_type=DomainModuleVariant.attr_legacy_no_color if exclude_colors else DomainModuleVariant.attr_legacy,
                 checkpoint_path=checkpoint_path / "domain_attr.ckpt",
                 args=hparams,
-            ),
-            LoadedDomainConfig(
+            )
+        domains.append(domain_config)
+
+    if 'v_latents' in modules:
+        domain_config = LoadedDomainConfig(
+                domain_type=DomainModuleVariant.v_latents,
+                checkpoint_path= checkpoint_path / "domain_v.ckpt"
+            )
+        domains.append(domain_config)
+
+    if 'color' in modules:
+        domain_config = LoadedDomainConfig(
                 domain_type=DomainModuleVariant.color,
                 checkpoint_path=checkpoint_path / "domain_attr.ckpt",
                 args=hparams,
-            ),
-        ]
-    else:
-        domains = [
-            LoadedDomainConfig(
-                domain_type=DomainModuleVariant.v_latents,
-                checkpoint_path= checkpoint_path / "domain_v.ckpt"
-            ),
-            LoadedDomainConfig(
-                domain_type=DomainModuleVariant.attr_legacy_no_color if exclude_colors else DomainModuleVariant.attr_legacy,
-                checkpoint_path=checkpoint_path / "domain_attr.ckpt",
-                args=hparams,
-            ),
-        ]
+            )
+
+        domains.append(domain_config)
     
     # Create scheduler function
     def get_scheduler(optimizer: Optimizer, scheduler_type: str = "onecycle"):
@@ -576,7 +577,7 @@ def setup_global_workspace(
     
     return global_workspace, domain_modules
 
-def setup_data_module(data_path, config:Config, exclude_colors=True, nb_module=3):
+def setup_data_module(data_path, config:Config, exclude_colors=True, modules=['attr', 'v_latents']):
     """
     Set up the data module for training.
     
@@ -588,11 +589,7 @@ def setup_data_module(data_path, config:Config, exclude_colors=True, nb_module=3
     """
     from simple_shapes_dataset import SimpleShapesDataModule, get_default_domains
     
-    domain_classes = {}
-    if nb_module == 3:
-        domain_classes = get_default_domains(["v_latents", "color", "attr"])
-    else:
-        domain_classes = get_default_domains(["v_latents", "attr"])
+    domain_classes = get_default_domains(modules)
     
     return SimpleShapesDataModule(
         data_path,
@@ -666,7 +663,8 @@ def train_global_workspace(
     load_from_checkpoint=True,
     switch_epoch=0,
     custom_weights=None,
-    noise=None):
+    noise=None,
+    modules=['attr', 'v_latents']):
     """
     Train a global workspace model with the given configuration.
     
@@ -687,12 +685,12 @@ def train_global_workspace(
     
     data_module = None
     if switch_epoch == 0:
-        data_module_1 = setup_data_module(REGULAR_DATASET_PATH, config, exclude_colors=exclude_colors)
-        data_module_2 = setup_data_module(REGULAR_DATASET_PATH, config, exclude_colors=exclude_colors)
+        data_module_1 = setup_data_module(REGULAR_DATASET_PATH, config, exclude_colors=exclude_colors, modules=modules)
+        data_module_2 = setup_data_module(REGULAR_DATASET_PATH, config, exclude_colors=exclude_colors, modules=modules)
         data_module = SequentialDataModule(data_module_1, data_module_2, switch_epoch=switch_epoch)
     if switch_epoch>0:
-        data_module_1 = setup_data_module(config.dataset.path, config, exclude_colors=exclude_colors)
-        data_module_2 = setup_data_module(REGULAR_DATASET_PATH, config, exclude_colors=exclude_colors)
+        data_module_1 = setup_data_module(config.dataset.path, config, exclude_colors=exclude_colors,modules=modules)
+        data_module_2 = setup_data_module(REGULAR_DATASET_PATH, config, exclude_colors=exclude_colors, modules=modules)
         data_module = SequentialDataModule(data_module_1, data_module_2, switch_epoch=switch_epoch)
 
     # 2. Set up global workspace
@@ -703,7 +701,8 @@ def train_global_workspace(
         apply_custom_init=apply_custom_init,
         load_from_checkpoint=load_from_checkpoint,
         custom_weights=custom_weights,
-        noise=noise)
+        noise=noise,
+        modules=modules)
     
     # 3. Set up logger and callbacks
     logger, callbacks, checkpoint_dir = setup_logger_and_callbacks(config, experiment_name, project_name, switch_epoch)
@@ -734,7 +733,7 @@ def train_global_workspace(
     # 4. Create trainer
     trainer = Trainer(
         logger=logger,
-        max_epochs=600,
+        max_epochs=200,
         default_root_dir=config.default_root_dir,
         callbacks=callbacks,
         precision=config.training.precision,
@@ -756,7 +755,7 @@ def train_global_workspace(
 
 
 @torch.no_grad()
-def get_data_translated(global_workspace, train_samples, n_samples=32, fusion_attr_weight=1.0, show_results_fusion=False):
+def get_data_translated_attr(global_workspace, train_samples, n_samples=32, fusion_attr_weight=1.0, show_results_fusion=False):
     selection_mod = FusionMethod(n_samples, fusion_attr_weight)
 
     visual_module = cast(VisualLatentDomainModule, global_workspace.domain_mods["v_latents"])
@@ -799,3 +798,50 @@ def get_data_translated(global_workspace, train_samples, n_samples=32, fusion_at
         "images_decoded": result_images,
         "attr_decoded": result_attr
     }
+
+
+@torch.no_grad()
+def get_data_translated_attr_color(global_workspace, train_samples, n_samples=32, fusion_attr_weight=1.0, show_results_fusion=False):
+    visual_module = cast(VisualLatentDomainModule, global_workspace.domain_mods["v_latents"])
+    train_paired_samples = train_samples[frozenset(["v_latents", "attr", "color"])]
+    train_images = visual_module.decode_images(train_paired_samples["v_latents"]).detach().cpu()
+    
+    if type(train_paired_samples["attr"]) == list:
+        train_attr = torch.cat((train_paired_samples["attr"][0], train_paired_samples["attr"][1]), dim=1).detach().cpu()
+    else:
+        train_attr = train_paired_samples["attr"].detach().cpu()
+
+    unimodal_latents = global_workspace.encode_domains(train_samples)
+    gw_latents = global_workspace.encode(unimodal_latents)
+
+    z_attr = gw_latents[frozenset({'v_latents', 'attr', 'color'})]['attr']
+    x_color_from_attr = global_workspace.decode({'attr': z_attr})['attr']['color']
+
+    z_col = global_workspace.encode({'color': {'color':x_color_from_attr}})['color']['color']
+
+    z = 0.1*z_col + 0.9*z_attr
+
+    gw_latents_decoded = global_workspace.decode({'fusion': z})['fusion']
+
+    # Extraction et nettoyage
+    attr_decoded = gw_latents_decoded["attr"]
+    images_decoded = visual_module.decode_images(gw_latents_decoded['v_latents']).detach().cpu()
+
+
+    result_attr = attr_decoded
+    result_images = images_decoded
+
+    torch.cuda.empty_cache()
+
+    return {
+        "train_images": train_images,
+        "train_attr": train_attr,
+        "images_decoded": result_images,
+        "attr_decoded": result_attr
+    }
+
+def get_data_translated(global_workspace, train_samples, n_samples=32, fusion_attr_weight=1.0, show_results_fusion=False, has_color_module=False):
+    if has_color_module:
+        return get_data_translated_attr_color(global_workspace, train_samples, n_samples, fusion_attr_weight, show_results_fusion)
+    else:
+        return get_data_translated_attr(global_workspace, train_samples, n_samples, fusion_attr_weight, show_results_fusion)

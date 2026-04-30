@@ -11,7 +11,6 @@ global_workspace:
             attr: 256
             attr_legacy_no_color: 256
             v_latents: 256
-            cat: 256
             color: 256
         n_layers: 2
 
@@ -20,7 +19,6 @@ global_workspace:
             attr: 256
             attr_legacy_no_color: 256
             v_latents: 256
-            cat: 256
             color: 256
         n_layers: 2
 

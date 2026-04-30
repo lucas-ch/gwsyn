@@ -74,6 +74,8 @@ domain_proportions:
 
     -   domains: ["attr"]
         proportion: 1.0
+
     -   domains: ["v", "attr"]
+        proportion: 1.0
 
 output_dir: "./base_params"
