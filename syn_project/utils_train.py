@@ -1,12 +1,13 @@
 from datetime import datetime
 import os
 import pickle
-from typing import Any, Sequence, cast
+from typing import cast
 from collections.abc import Mapping
 
-from shimmer import ContrastiveLoss, DomainModule, GWLosses2Domains, GlobalWorkspace2Domains, LatentsDomainGroupsT, LossOutput, ModelModeT, RawDomainGroupsT, SelectionBase, SingleDomainSelection, combine_loss
+from shimmer import ContrastiveLoss, GWLosses2Domains, GlobalWorkspace2Domains, LatentsDomainGroupT, LatentsDomainGroupsT, LossOutput, ModelModeT, RawDomainGroupsT, SelectionBase
 from shimmer_ssd.logging import batch_to_device
-from shimmer_ssd.modules.domains.visual import VisualLatentDomainModule, mse_loss
+from shimmer_ssd.modules.domains.visual import VisualLatentDomainModule
+from shimmer.utils import group_batch_size, group_device
 from simple_shapes_dataset import SimpleShapesDataModule, get_default_domains
 
 import numpy as np
@@ -28,7 +29,6 @@ from .utils_color_analysis import *
 from .utils_shape_loss import *
 from lightning.pytorch.loggers.wandb import WandbLogger
 from lightning.pytorch.callbacks import ModelCheckpoint
-import copy
 
 def get_project_root():
     current = Path.cwd()
@@ -39,6 +39,29 @@ def get_project_root():
 
 ROOT_PATH = get_project_root()
 REGULAR_DATASET_PATH = f"{ROOT_PATH}/simple_shapes_dataset_biased_00"
+
+class CustomSelection(SelectionBase):
+    def forward(
+        self, domains: LatentsDomainGroupT, encodings_pre_fusion: LatentsDomainGroupT
+    ) -> dict[str, torch.Tensor]:
+        """
+        Forward pass of the module.
+
+        Args:
+            domains (`LatentsDomainGroupT`): input unimodal latent representations
+            encodings_pre_fusion (`LatentsDomainGroupT`): pre-fusion domain latent
+                representation.
+
+        Returns:
+            `dict[str, torch.Tensor]`: whether the domain is selected for each input
+            in the batch.
+        """
+        selection: dict[str, torch.Tensor] = {}
+        bs = group_batch_size(domains)
+        coef = torch.full((bs,), 1.0 / len(domains), device=group_device(domains))
+        for domain in domains:
+            selection[domain] = coef.clone()
+        return selection
 
 class MyCustomGWLosses(GWLosses2Domains):
     def __init__(self, gw_mod, selection_mod, domain_mods, loss_coefs, contrastive_fn, custom_weights=None, noise=None):
@@ -61,6 +84,54 @@ class MyCustomGWLosses(GWLosses2Domains):
 
         return loss
 
+    def direct_translation_loss(
+        self,
+        latent_domains: LatentsDomainGroupsT,
+        raw_data: RawDomainGroupsT,
+      
+    ):
+        losses: dict[str, torch.Tensor] = {}
+        metrics: dict[str, torch.Tensor] = {}
+
+        for domains, latents in latent_domains.items():
+            if len(domains) < 2:
+                continue
+            for domain_name_target in domains:
+                gw_latents = self.gw_mod.encode(latents)
+                mod = self.domain_mods[domain_name_target]
+
+                for domain_name_source in self.domain_mods:
+                    if domain_name_target == domain_name_source:
+                        continue
+
+                    z = gw_latents[domain_name_source]
+
+                    loss_name = f"{domain_name_source}_to_{domain_name_target}"
+                    if loss_name in losses:
+                        raise ValueError(f"{loss_name} is already computed.")
+
+                    prediction = self.gw_mod.decode(z, domains={domain_name_target})[domain_name_target]
+
+                    loss_output = mod.compute_tr_loss(
+                        prediction,
+                        latents[domain_name_target],
+                        raw_data[domains][domain_name_target],)
+                    if loss_output is None:
+                        continue
+
+                    losses[f"translation_{loss_name}"] = loss_output.loss
+                    metrics.update(
+                        {
+                                f"translation_{loss_name}_{k}": v
+                                for k, v in loss_output.metrics.items()
+                        }
+                    )
+
+        losses["translations"] = torch.stack(list(losses.values()), dim=0).mean()
+        losses.update(metrics)
+
+        return losses
+
     def step(
         self,
         raw_data: RawDomainGroupsT,
@@ -81,6 +152,8 @@ class MyCustomGWLosses(GWLosses2Domains):
         metrics.update(self.demi_cycle_loss(domain_latents, raw_data))
         metrics.update(self.cycle_loss(domain_latents, raw_data))
         metrics.update(self.translation_loss(domain_latents, raw_data))
+        metrics.update(self.direct_translation_loss(domain_latents, raw_data))
+        metrics.update(self.contrastive_loss(domain_latents))
 
         custom_weights = self.custom_weights
 
@@ -109,16 +182,19 @@ class MyGlobalWorkspace(GlobalWorkspace2Domains):
             loss_coefs,
             custom_weights,
             noise,
+            fusion_activation_function = torch.nn.Identity(),
             *args,
             **kwargs):
-        super().__init__(domain_mods, gw_encoders, gw_decoders, workspace_dim, loss_coefs, *args, **kwargs)
+        super().__init__(domain_mods, gw_encoders, gw_decoders, workspace_dim, loss_coefs, fusion_activation_fn=fusion_activation_function, *args, **kwargs)
 
         contrastive_loss = ContrastiveLoss(
                 torch.tensor([1 / 0.07]).log(), "mean", False
             )
+        
+        selection_mod = CustomSelection()
         self.loss_mod = MyCustomGWLosses(
             self.gw_mod, 
-            self.selection_mod, 
+            selection_mod, 
             self.domain_mods, 
             loss_coefs,
             contrastive_loss,

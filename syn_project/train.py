@@ -33,16 +33,31 @@ if __name__ == "__main__":
     }
 
     custom_weights = {
-        'cycle_color_through_v_latents': 0.0,
         'demi_cycle_attr': 1.0,
         'demi_cycle_color': 1.0,
         'demi_cycle_v_latents': 1.0,
         'translation_v_latents_to_color': 1.0,
         'translation_attr_to_v_latents': 1.0,
-        'translation_color_to_v_latents': 0.0,
+        'translation_attr_to_color': 1.0,
+        'translation_color_to_v_latents': 1.0,
+        'translation_color_to_attr_loss_cat': 1.0,
+        'translation_color_to_attr_loss_attr': 1.0,
         'translation_v_latents_to_attr': 1.0,
+        'translation_v_latents_to_color': 1.0,
+        'translation_attr/v_latents_to_color': 1.0,
+        'translation_attr/color_to_v_latents': 1.0,
+        'translation_color/v_latents_to_attr': 1.0,
         'cycle_attr_through_color_loss_cat': 1.0,
-        'attr_color_loss': 1.0
+        'cycle_attr_through_color_loss_attr': 1.0,
+        "cycle_attr_through_v_latents_loss_attr": 1.0,
+        "cycle_attr_through_v_latents_loss_cat": 1.0,
+        "cycle_color_through_attr": 1.0,
+        "cycle_color_through_v_latents": 1.0,
+        "cycle_v_latents_through_attr": 1.0,
+        "cycle_v_latents_through_color": 1.0,
+        "contrastive_attr_and_color": 1.0,
+        "contrastive_attr_and_v_latents": 1.0,
+        "contrastive_color_and_v_latents": 1.0,
         }
 
     noise = {"mean": 0.0, "std": 0.0}
