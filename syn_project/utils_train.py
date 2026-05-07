@@ -4,7 +4,7 @@ import pickle
 from typing import cast
 from collections.abc import Mapping
 
-from shimmer import ContrastiveLoss, GWLosses2Domains, GlobalWorkspace2Domains, LatentsDomainGroupT, LatentsDomainGroupsT, LossOutput, ModelModeT, RawDomainGroupsT, SelectionBase
+from shimmer import ContrastiveLoss, GWLosses2Domains, GlobalWorkspace2Domains, LatentsDomainGroupT, LatentsDomainGroupsT, LossOutput, ModelModeT, RawDomainGroupsT, SelectionBase, combine_loss
 from shimmer_ssd.logging import batch_to_device
 from shimmer_ssd.modules.domains.visual import VisualLatentDomainModule
 from shimmer.utils import group_batch_size, group_device
@@ -68,22 +68,6 @@ class MyCustomGWLosses(GWLosses2Domains):
         super().__init__(gw_mod, selection_mod, domain_mods, loss_coefs, contrastive_fn)
         self.custom_weights = custom_weights
 
-    def attr_color_loss(
-        self,
-        latent_domains: LatentsDomainGroupsT,
-        raw_data: RawDomainGroupsT,
-    ) -> LossOutput:
-
-        latents_source = latent_domains[frozenset({'color', 'v_latents', 'attr'})]
-        gw_latents = self.gw_mod.encode(latents_source)
-        z = 0.5*gw_latents['color'] + 0.5*gw_latents['attr']
-
-        prediction = self.gw_mod.decode(z, domains={'v_latents'})['v_latents']
-
-        loss = LossOutput(F.mse_loss(prediction, latents_source['v_latents'], reduction="mean"))
-
-        return loss
-
     def direct_translation_loss(
         self,
         latent_domains: LatentsDomainGroupsT,
@@ -144,27 +128,22 @@ class MyCustomGWLosses(GWLosses2Domains):
             current_shape_loss = shape_loss(self.gw_mod, domain_latents, raw_data)
             metrics.update({"shape_loss": current_shape_loss.loss})
 
-        if "attr_color_loss" in self.custom_weights.keys() and self.custom_weights["attr_color_loss"] > 0:
-            current_attr_color_loss = self.attr_color_loss(domain_latents, raw_data)
-            metrics.update({"attr_color_loss": current_attr_color_loss.loss})
-
         # 1. Calcul des métriques de base
         metrics.update(self.demi_cycle_loss(domain_latents, raw_data))
         metrics.update(self.cycle_loss(domain_latents, raw_data))
         metrics.update(self.translation_loss(domain_latents, raw_data))
-        metrics.update(self.direct_translation_loss(domain_latents, raw_data))
         metrics.update(self.contrastive_loss(domain_latents))
 
         custom_weights = self.custom_weights
+
+        if len(custom_weights.items()) == 0:
+            return LossOutput(combine_loss(metrics, self.loss_coefs), metrics)
 
         weighted_losses = []
         for key, weight in custom_weights.items():
             if key in metrics:
                 weighted_losses.append(metrics[key] * weight)
 
-        if not weighted_losses:
-            # Fallback au cas où aucune clé ne correspond
-            return LossOutput(torch.tensor(0.0, device=raw_data.device), metrics)
 
         # On fait la somme de toutes les pertes pondérées
         custom_loss = torch.stack(weighted_losses).sum()
@@ -254,70 +233,6 @@ class CustomFlexibleCheckpoint(Callback):
         if should_save:
             ckpt_path = f"{self.dirpath}/save-epoch={epoch}.ckpt"
             trainer.save_checkpoint(ckpt_path)
-
-    def run_color_analysis(self, trainer:Trainer, pl_module):
-        pl_module.eval()
-        with torch.no_grad():
-            n_samples = 32 if "test1" in self.experiment_name else 1000
-            data_module = get_data_module(self.project_name,  self.experiment_name)
-            test_samples = get_data_samples(data_module, n_samples, split= "train")
-            data_translated = get_data_translated(pl_module, test_samples, n_samples)            
-            
-            masks = get_color_masks(data_translated["train_images"])
-            masks_decoded = get_color_masks(data_translated["images_decoded"])
-
-            colors_from_data_img = get_color_from_images(data_translated["train_images"], masks)
-            colors_from_decoded_img = get_color_from_images(data_translated["images_decoded"], masks_decoded)
-
-            categories_from_data_attr = data_translated['train_attr'][:, 0:3].detach().cpu().numpy()
-
-            categories_from_decoded_attr = categorize_decoded_attr(data_translated["attr_decoded"])
-            categories_indices = categories_from_decoded_attr.argmax(dim=1).detach().cpu().numpy()
-
-            save_path = os.path.join(self.dirpath, f"stats_epoch_{trainer.current_epoch:03d}.npz")
-
-            np.savez_compressed(
-                save_path,
-                colors_from_data_img=colors_from_data_img,
-                colors_from_decoded_img=colors_from_decoded_img,
-                categories_from_data_attr=categories_from_data_attr,
-                categories_from_decoded_attr=categories_from_decoded_attr.detach().cpu().numpy()
-            )
-        
-            orig_subset, decoded_subset = get_top_img_per_category(data_translated)
-            fig = plot_original_translated_comparison(orig_subset, decoded_subset)
-            output_dir = os.path.join(self.dirpath, "visual_logs")
-            os.makedirs(output_dir, exist_ok=True)
-
-            file_name = f"fig_comparison_epoch_{trainer.current_epoch:03d}.png"
-            save_path = os.path.join(output_dir, file_name)
-            fig.savefig(save_path, dpi=150, bbox_inches='tight')
-
-            trainer.logger.experiment.log({
-                "visuals/comparison": wandb.Image(fig),
-                "epoch": trainer.current_epoch
-            }) 
-            plt.close(fig)
-
-            categories_indices = categories_from_decoded_attr.argmax(dim=1).detach().cpu().numpy()
-            colors_np = np.vstack(colors_from_decoded_img)
-
-            fig = plot_rgb_distribution(colors_np, categories_indices)
-            output_dir = os.path.join(self.dirpath, "visual_logs")
-            os.makedirs(output_dir, exist_ok=True)
-
-            file_name = f"fig_color_distrib_epoch_{trainer.current_epoch:03d}.png"
-            save_path = os.path.join(output_dir, file_name)
-            fig.savefig(save_path, dpi=150, bbox_inches='tight')
-
-            trainer.logger.experiment.log({
-                "visuals/color_distrib": wandb.Image(fig),
-                "epoch": trainer.current_epoch
-            })
-
-            plt.close(fig)
-
-        pl_module.train()
 
 
     def on_train_epoch_end(self, trainer, pl_module):
@@ -562,7 +477,24 @@ def setup_global_workspace(
                 checkpoint_path=checkpoint_path / "domain_attr.ckpt",
                 args=hparams,
             )
+        domains.append(domain_config)
 
+        
+    if 'cat' in modules:
+        domain_config = LoadedDomainConfig(
+                domain_type=DomainModuleVariant.cat,
+                checkpoint_path=checkpoint_path / "domain_attr.ckpt",
+                args=hparams,
+            )
+        domains.append(domain_config)
+
+
+    if 'position' in modules:
+        domain_config = LoadedDomainConfig(
+                domain_type=DomainModuleVariant.position,
+                checkpoint_path=checkpoint_path / "domain_attr.ckpt",
+                args=hparams,
+            )
         domains.append(domain_config)
     
     # Create scheduler function
@@ -809,7 +741,7 @@ def train_global_workspace(
     # 4. Create trainer
     trainer = Trainer(
         logger=logger,
-        max_epochs=200,
+        max_epochs=40,
         default_root_dir=config.default_root_dir,
         callbacks=callbacks,
         precision=config.training.precision,
