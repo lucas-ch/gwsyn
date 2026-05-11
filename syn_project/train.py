@@ -8,15 +8,15 @@ torch.autograd.set_detect_anomaly(True)
 if __name__ == "__main__":
 
     project_name = "syn"
-    condition = "4mod4"
+    condition = "debug"
     data = "biased_00"
     switch_epoch = 0
 
-    modules = ['position', 'cat', 'color', 'v_latents']
+    modules = ['attr', 'color', 'v_latents']
+    clean_names = [m.replace("_", "") for m in sorted(modules)]
+    config_filename = f"{'_'.join(clean_names)}.yaml"
 
-    config = load_config(f"{ROOT_PATH}/config", use_cli=False, load_files=["high_cycles.yaml"])
-    if len(modules) > 2:
-        config = load_config(f"{ROOT_PATH}/config", use_cli=False, load_files=["color_mod.yaml"])
+    config = load_config(f"{ROOT_PATH}/config", use_cli=False, load_files=[config_filename])
                 
     experiment_name = get_experiment_name(condition, data, switch_epoch)
     exclude_colors = False if condition == "control" else True
@@ -33,67 +33,48 @@ if __name__ == "__main__":
     }
 
     custom_weights = {
-        'contrastive_cat_and_color': 0.1,
-        'contrastive_cat_and_v_latents': 0.1,
-        'contrastive_color_and_v_latents': 0.1,
-        'contrastive_position_and_cat': 0.1,
-        'contrastive_position_and_color': 0.1,
-        'contrastive_position_and_v_latents': 0.1,
+    # --- DEMI-CYCLE (Reconstruction directe) ---
+    'demi_cycle_attr': 1.0,
+    'demi_cycle_color': 1.0,
+    'demi_cycle_v_latents': 1.0,
 
-        'cycle_cat_through_color': 1.0,
-        'cycle_cat_through_position': 1.0,
-        'cycle_cat_through_v_latents': 1.0,
-        'cycle_color_through_cat': 1.0,
-        'cycle_color_through_position': 1.0,
-        'cycle_color_through_v_latents': 1.0,
-        'cycle_position_through_cat': 1.0,
-        'cycle_position_through_color': 1.0,
-        'cycle_position_through_v_latents': 1.0,
-        'cycle_v_latents_through_cat': 1.0,
-        'cycle_v_latents_through_color': 1.0,
-        'cycle_v_latents_through_position': 1.0,
+    # --- TRANSLATIONS (N-to-1) ---
+    # Cible: ATTR
+    'translation_color_to_attr': 1.0,
+    'translation_v_latents_to_attr': 1.0,
+    'translation_color/v_latents_to_attr': 1.0,
 
-        'demi_cycle_cat': 1.0,
-        'demi_cycle_color': 1.0,
-        'demi_cycle_position': 1.0,
-        'demi_cycle_v_latents': 1.0,
+    # Cible: COLOR
+    'translation_attr_to_color': 1.0,
+    'translation_v_latents_to_color': 1.0,
+    'translation_attr/v_latents_to_color': 1.0,
 
-        # --- Cible: CAT ---
-        'translation_color_to_cat': 1.0,
-        'translation_position_to_cat': 1.0,
-        'translation_v_latents_to_cat': 1.0,
-        'translation_color/position_to_cat': 1.0,
-        'translation_color/v_latents_to_cat': 1.0,
-        'translation_position/v_latents_to_cat': 1.0,
-        'translation_color/position/v_latents_to_cat': 1.0,
+    # Cible: V_LATENTS
+    'translation_attr_to_v_latents': 1.0,
+    'translation_color_to_v_latents': 1.0,
+    'translation_attr/color_to_v_latents': 1.0,
 
-        # --- Cible: COLOR ---
-        'translation_cat_to_color': 1.0,
-        'translation_position_to_color': 1.0,
-        'translation_v_latents_to_color': 1.0,
-        'translation_cat/position_to_color': 1.0,
-        'translation_cat/v_latents_to_color': 1.0,
-        'translation_position/v_latents_to_color': 1.0,
-        'translation_cat/position/v_latents_to_color': 1.0,
+    # --- CYCLES (1-through-N) ---
+    # Source: ATTR
+    'cycle_attr_through_color': 1.0,
+    'cycle_attr_through_v_latents': 1.0,
+    'cycle_attr_through_color/v_latents': 1.0,
 
-        # --- Cible: POSITION ---
-        'translation_cat_to_position': 1.0,
-        'translation_color_to_position': 1.0,
-        'translation_v_latents_to_position': 1.0,
-        'translation_cat/color_to_position': 1.0,
-        'translation_cat/v_latents_to_position': 1.0,
-        'translation_color/v_latents_to_position': 1.0,
-        'translation_cat/color/v_latents_to_position': 1.0,
+    # Source: COLOR
+    'cycle_color_through_attr': 1.0,
+    'cycle_color_through_v_latents': 1.0,
+    'cycle_color_through_attr/v_latents': 1.0,
 
-        # --- Cible: V_LATENTS ---
-        'translation_cat_to_v_latents': 0.1,
-        'translation_color_to_v_latents': 0.1,
-        'translation_position_to_v_latents': 0.1,
-        'translation_cat/color_to_v_latents': 1.0,
-        'translation_cat/position_to_v_latents': 1.0,
-        'translation_color/position_to_v_latents': 1.0,
-        'translation_cat/color/position_to_v_latents': 10.0,
-        }
+    # Source: V_LATENTS
+    'cycle_v_latents_through_attr': 1.0,
+    'cycle_v_latents_through_color': 1.0,
+    'cycle_v_latents_through_attr/color': 1.0,
+
+    # --- CONTRASTIVE (Pairs) ---
+    'contrastive_attr_and_color': 1.0,
+    'contrastive_attr_and_v_latents': 1.0,
+    'contrastive_color_and_v_latents': 1.0,
+}
 
     noise = {"mean": 0.0, "std": 0.0}
 

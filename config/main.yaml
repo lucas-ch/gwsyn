@@ -12,7 +12,6 @@ wandb:
     save_dir: "./wandb"
     project: "Shimmer-SSD"
     entity: "lexman-psl"
-    api_key: 8761f3bd1d5f630c1b284da5ced0b1e371a4ceb1
 
 
 # Uncomment the following to use mixed-precision for training:

@@ -741,7 +741,7 @@ def train_global_workspace(
     # 4. Create trainer
     trainer = Trainer(
         logger=logger,
-        max_epochs=40,
+        max_epochs=30,
         default_root_dir=config.default_root_dir,
         callbacks=callbacks,
         precision=config.training.precision,
