@@ -58,7 +58,7 @@ class CustomSelection(SelectionBase):
         """
         selection: dict[str, torch.Tensor] = {}
         bs = group_batch_size(domains)
-        coef = torch.full((bs,), 1.0 / len(domains), device=group_device(domains))
+        coef = torch.full((bs,), 1.0, device=group_device(domains))
         for domain in domains:
             selection[domain] = coef.clone()
         return selection
@@ -68,67 +68,14 @@ class MyCustomGWLosses(GWLosses2Domains):
         super().__init__(gw_mod, selection_mod, domain_mods, loss_coefs, contrastive_fn)
         self.custom_weights = custom_weights
 
-    def direct_translation_loss(
-        self,
-        latent_domains: LatentsDomainGroupsT,
-        raw_data: RawDomainGroupsT,
-      
-    ):
-        losses: dict[str, torch.Tensor] = {}
-        metrics: dict[str, torch.Tensor] = {}
-
-        for domains, latents in latent_domains.items():
-            if len(domains) < 2:
-                continue
-            for domain_name_target in domains:
-                gw_latents = self.gw_mod.encode(latents)
-                mod = self.domain_mods[domain_name_target]
-
-                for domain_name_source in self.domain_mods:
-                    if domain_name_target == domain_name_source:
-                        continue
-
-                    z = gw_latents[domain_name_source]
-
-                    loss_name = f"{domain_name_source}_to_{domain_name_target}"
-                    if loss_name in losses:
-                        raise ValueError(f"{loss_name} is already computed.")
-
-                    prediction = self.gw_mod.decode(z, domains={domain_name_target})[domain_name_target]
-
-                    loss_output = mod.compute_tr_loss(
-                        prediction,
-                        latents[domain_name_target],
-                        raw_data[domains][domain_name_target],)
-                    if loss_output is None:
-                        continue
-
-                    losses[f"translation_{loss_name}"] = loss_output.loss
-                    metrics.update(
-                        {
-                                f"translation_{loss_name}_{k}": v
-                                for k, v in loss_output.metrics.items()
-                        }
-                    )
-
-        losses["translations"] = torch.stack(list(losses.values()), dim=0).mean()
-        losses.update(metrics)
-
-        return losses
-
     def step(
         self,
         raw_data: RawDomainGroupsT,
         domain_latents: LatentsDomainGroupsT,
         mode: ModelModeT,
-    ) -> LossOutput:
+    ) -> LossOutput:        
         metrics: dict[str, torch.Tensor] = {}
 
-        if "shape_loss" in self.custom_weights.keys() and self.custom_weights["shape_loss"] > 0:
-            current_shape_loss = shape_loss(self.gw_mod, domain_latents, raw_data)
-            metrics.update({"shape_loss": current_shape_loss.loss})
-
-        # 1. Calcul des métriques de base
         metrics.update(self.demi_cycle_loss(domain_latents, raw_data))
         metrics.update(self.cycle_loss(domain_latents, raw_data))
         metrics.update(self.translation_loss(domain_latents, raw_data))
@@ -144,8 +91,6 @@ class MyCustomGWLosses(GWLosses2Domains):
             if key in metrics:
                 weighted_losses.append(metrics[key] * weight)
 
-
-        # On fait la somme de toutes les pertes pondérées
         custom_loss = torch.stack(weighted_losses).sum()
 
 
@@ -162,14 +107,17 @@ class MyGlobalWorkspace(GlobalWorkspace2Domains):
             custom_weights,
             noise,
             fusion_activation_function = torch.nn.Identity(),
+            modules_to_freeze=[],
             *args,
             **kwargs):
+        kwargs.pop('fusion_activation_fn', None)
         super().__init__(domain_mods, gw_encoders, gw_decoders, workspace_dim, loss_coefs, fusion_activation_fn=fusion_activation_function, *args, **kwargs)
 
         contrastive_loss = ContrastiveLoss(
                 torch.tensor([1 / 0.07]).log(), "mean", False
             )
         
+        self.modules_to_freeze=modules_to_freeze
         selection_mod = CustomSelection()
         self.loss_mod = MyCustomGWLosses(
             self.gw_mod, 
@@ -180,6 +128,31 @@ class MyGlobalWorkspace(GlobalWorkspace2Domains):
             custom_weights,
             noise
         )
+
+    def on_train_start(self):            
+            for name in self.modules_to_freeze:
+                if name in self.gw_mod.gw_encoders:
+                    encoder = self.gw_mod.gw_encoders[name]
+                    decoder = self.gw_mod.gw_decoders[name]
+                    
+                    # 1. Bloquer le calcul des gradients (Freeze des poids)
+                    for param in encoder.parameters():
+                        param.requires_grad = False
+                    
+                    for param in decoder.parameters():
+                        param.requires_grad = False
+
+                    # 2. Passer en mode évaluation (Désactive Dropout/BatchNorm)
+                    encoder.eval()
+                    decoder.eval()
+                    
+                    print(f"❄️ Module {name} freeze avec succès.")
+
+    def on_train_epoch_start(self):
+            for name in self.modules_to_freeze:
+                if name in self.gw_mod.gw_encoders:
+                    self.gw_mod.gw_encoders[name].eval()
+                    self.gw_mod.gw_decoders[name].eval()
 
 class SequentialDataModule(LightningDataModule):
     def __init__(self, data_module_1:LightningDataModule, data_module_2:LightningDataModule, switch_epoch:int):
@@ -238,30 +211,6 @@ class CustomFlexibleCheckpoint(Callback):
     def on_train_epoch_end(self, trainer, pl_module):
         self.save_checkpoint(trainer)
 #        self.run_color_analysis(trainer, pl_module)
-
-class FusionMethod(SelectionBase):
-    def __init__(self, n_samples: int = 32, fusion_attr_weight: float = 1.0):
-        super().__init__()
-        self.n_samples = n_samples
-        self.fusion_attr_weight = fusion_attr_weight
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    def forward(
-        self, domains: Mapping[str, torch.Tensor], encodings_pre_fusion: Mapping[str, torch.Tensor]
-    ) -> dict[str, torch.Tensor]:
-        # If only one domain, we keep it
-        if len(domains) == 1:
-            return {domain: torch.ones(self.n_samples).to(self.device) for domain in domains}
-        else:
-            selection: dict[str, torch.Tensor] = {}
-            for domain in domains:
-                # We only keep the visual latents
-                if domain == "v_latents":
-                    selection["v_latents"] = (torch.ones(self.n_samples)*(1 - self.fusion_attr_weight)).to(self.device)
-                else:
-                    # and set 0 to all other domain
-                    selection[domain] = (torch.ones(self.n_samples)*self.fusion_attr_weight).to(self.device)
-            return selection
 
 
 def get_training_params(project_name, experiment_name):
@@ -433,7 +382,8 @@ def setup_global_workspace(
         gw_checkpoint_path=None,
         custom_weights=None,
         noise=None,
-        modules=['attr', 'v_latents']):
+        modules=['attr', 'v_latents'],
+        modules_to_freeze=[]):
     """
     Set up the global workspace model.
     
@@ -554,6 +504,7 @@ def setup_global_workspace(
         loss_coefs = config.global_workspace.loss_coefficients,
         custom_weights=custom_weights,
         noise=noise,
+        modules_to_freeze=modules_to_freeze,
         optim_lr=lr,
         optim_weight_decay = config.training.optim.weight_decay,
         scheduler=get_scheduler,
@@ -566,22 +517,17 @@ def setup_global_workspace(
     if load_from_checkpoint and gw_checkpoint_path is not None:
         print(f"Loading model from checkpoint: {gw_checkpoint_path}")
         # Load default weights
-        CHECKPOINT_PATH = gw_checkpoint_path
-        global_workspace = GlobalWorkspace2Domains.load_from_checkpoint(
-        CHECKPOINT_PATH,
-        domain_mods=domain_modules,
-        gw_encoders=gw_encoders,
-        gw_decoders=gw_decoders,
-        strict=False
-    )
-        # Reset the optimizer and scheduler
-        global_workspace.optimizer = None
-        global_workspace.scheduler = None
-        # Reset the callbacks
-        global_workspace.callbacks = None
-        
+        checkpoint = torch.load(gw_checkpoint_path, map_location="cpu")
+        global_workspace.load_state_dict(checkpoint['state_dict'], strict=False)
+        global_workspace.domain_mods["v_latents"].freeze()
+        global_workspace.domain_mods["v_latents"].eval()
+
+        for i in global_workspace.gw_mod.gw_encoders.keys():
+            global_workspace.gw_mod.gw_encoders[i].eval()
+            global_workspace.gw_mod.gw_decoders[i].eval()
+
         # Reset the training state
-        print(f"Loaded default weights from {CHECKPOINT_PATH}")
+        print(f"Loaded default weights from {gw_checkpoint_path}")
     
     return global_workspace, domain_modules
 
@@ -669,10 +615,12 @@ def train_global_workspace(
     apply_custom_init=True,
     exclude_colors=True,
     load_from_checkpoint=True,
+    gw_checkpoint_path=None,
     switch_epoch=0,
     custom_weights=None,
     noise=None,
-    modules=['attr', 'v_latents']):
+    modules=['attr', 'v_latents'],
+    modules_to_freeze=[]):
     """
     Train a global workspace model with the given configuration.
     
@@ -708,9 +656,11 @@ def train_global_workspace(
         exclude_colors=exclude_colors,
         apply_custom_init=apply_custom_init,
         load_from_checkpoint=load_from_checkpoint,
+        gw_checkpoint_path = gw_checkpoint_path,
         custom_weights=custom_weights,
         noise=noise,
-        modules=modules)
+        modules=modules,
+        modules_to_freeze=modules_to_freeze)
     
     # 3. Set up logger and callbacks
     logger, callbacks, checkpoint_dir = setup_logger_and_callbacks(config, experiment_name, project_name, switch_epoch)
@@ -741,7 +691,7 @@ def train_global_workspace(
     # 4. Create trainer
     trainer = Trainer(
         logger=logger,
-        max_epochs=30,
+        max_epochs=50,
         default_root_dir=config.default_root_dir,
         callbacks=callbacks,
         precision=config.training.precision,
@@ -764,8 +714,6 @@ def train_global_workspace(
 
 @torch.no_grad()
 def get_data_translated_attr(global_workspace, train_samples, n_samples=32, fusion_attr_weight=1.0, show_results_fusion=False):
-    selection_mod = FusionMethod(n_samples, fusion_attr_weight)
-
     visual_module = cast(VisualLatentDomainModule, global_workspace.domain_mods["v_latents"])
     train_paired_samples = train_samples[frozenset(["v_latents", "attr"])]
 
@@ -786,17 +734,8 @@ def get_data_translated_attr(global_workspace, train_samples, n_samples=32, fusi
     images_decoded = visual_module.decode_images(gw_latents_decoded['attr']['v_latents']).detach().cpu()
 
 
-    if show_results_fusion:
-        gw_latents_fusion = global_workspace.encode_and_fuse(unimodal_latents, selection_mod)
-        gw_latents_fusion_decoded = global_workspace.decode(gw_latents_fusion, ["v_latents", "attr"])
-        attr_fusion_decoded = gw_latents_fusion_decoded[frozenset({'v_latents', 'attr'})]['attr']
-        images_fusion_decoded = visual_module.decode_images(gw_latents_fusion_decoded[frozenset({'v_latents', 'attr'})]['v_latents']).detach().cpu()
-
-        result_attr = attr_fusion_decoded
-        result_images = images_fusion_decoded
-    else:
-        result_attr = attr_decoded
-        result_images = images_decoded
+    result_attr = attr_decoded
+    result_images = images_decoded
 
     torch.cuda.empty_cache()
 

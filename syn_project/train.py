@@ -8,11 +8,15 @@ torch.autograd.set_detect_anomaly(True)
 if __name__ == "__main__":
 
     project_name = "syn"
-    condition = "debug"
+    condition = "3mod_cselc"
     data = "biased_00"
     switch_epoch = 0
 
-    modules = ['attr', 'color', 'v_latents']
+    modules = ['attr', 'v_latents', 'color']
+    modules_to_freeze = []
+    load_from_checkpoint = False
+    gw_checkpoint_path = None
+
     clean_names = [m.replace("_", "") for m in sorted(modules)]
     config_filename = f"{'_'.join(clean_names)}.yaml"
 
@@ -76,7 +80,9 @@ if __name__ == "__main__":
     'contrastive_color_and_v_latents': 1.0,
 }
 
-    noise = {"mean": 0.0, "std": 0.0}
+
+
+    noise = {"mean": 1.0, "std": 0.0}
 
     log_training_params = {
         "experiment_name": experiment_name,
@@ -98,9 +104,11 @@ if __name__ == "__main__":
         experiment_name=experiment_name,
         apply_custom_init=apply_custom_init,
         exclude_colors=exclude_colors,
-        load_from_checkpoint=False,
+        load_from_checkpoint=load_from_checkpoint,
+        gw_checkpoint_path=gw_checkpoint_path,
         switch_epoch=switch_epoch,
         custom_weights=custom_weights,
         noise=noise,
-        modules=modules
+        modules=modules,
+        modules_to_freeze=modules_to_freeze
     )
