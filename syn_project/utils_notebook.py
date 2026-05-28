@@ -214,6 +214,27 @@ def split_softmax_category_attributes(concat_tensor: torch.Tensor) -> list[torch
     # Retourne une liste de deux tenseurs comme dans ton premier exemple
     return [probs, rest]
 
+def split_binary_category_attributes(concat_tensor: torch.Tensor) -> list[torch.Tensor]:
+    """
+    Sépare un tenseur (N, 8) en deux tenseurs :
+    - Les 3 premiers (logits -> convertis en 0 ou 1 exclusifs)
+    - Les 5 derniers (inchangés)
+    """
+    # 1. Extraction des 3 premières colonnes (logits)
+    logits = concat_tensor[:, :3]
+    
+    # 2. Trouver l'indice de la classe dominante (ex: index 1)
+    predicted_indices = torch.argmax(logits, dim=1)
+    
+    # 3. Convertir en vecteur One-Hot (ex: [0, 1, 0])
+    # num_classes=3 garantit qu'on a bien 3 colonnes en sortie
+    binary_preds = F.one_hot(predicted_indices, num_classes=3).float()
+    
+    # 4. Extraction des 5 colonnes restantes
+    rest = concat_tensor[:, 3:]
+    
+    return [binary_preds, rest]
+
 def analyze_attribute_drift(original: torch.Tensor, reconstructed: torch.Tensor):
     """
     Calculates the average absolute difference (drift) between original and 

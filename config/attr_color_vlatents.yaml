@@ -2,8 +2,8 @@ global_workspace:
     latent_dim: 12
 
     loss_coefficients:
-        cycles: 10
-        contrastives: .1
+        cycles: 1
+        contrastives: 1
         demi_cycles: 1
         translations: 1
     encoders:

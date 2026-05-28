@@ -58,7 +58,8 @@ class CustomSelection(SelectionBase):
         """
         selection: dict[str, torch.Tensor] = {}
         bs = group_batch_size(domains)
-        coef = torch.full((bs,), 1.0, device=group_device(domains))
+        n =len(domains.keys())
+        coef = torch.full((bs,), 1.0 / n, device=group_device(domains))
         for domain in domains:
             selection[domain] = coef.clone()
         return selection
@@ -194,14 +195,18 @@ class CustomFlexibleCheckpoint(Callback):
         epoch = trainer.current_epoch + 1
         should_save = False
 
-        if self.switch_epoch is not None and self.switch_epoch <= epoch < (self.switch_epoch + 100):
-            if (epoch - self.switch_epoch) % 10 == 0:
-                should_save = True
+        if epoch < 10:
+            should_save = True
+
         else:
-            if epoch in [1, 10, 20, 40, 60, 80, 100]:
-                should_save = True
-            elif epoch > 100 and epoch % 50 == 0:
-                should_save = True
+            if self.switch_epoch is not None and self.switch_epoch <= epoch < (self.switch_epoch + 100):
+                if (epoch - self.switch_epoch) % 10 == 0:
+                    should_save = True
+            else:
+                if epoch in [1, 10, 20, 40, 60, 80, 100]:
+                    should_save = True
+                elif epoch > 100 and epoch % 50 == 0:
+                    should_save = True
 
         if should_save:
             ckpt_path = f"{self.dirpath}/save-epoch={epoch}.ckpt"
@@ -383,7 +388,8 @@ def setup_global_workspace(
         custom_weights=None,
         noise=None,
         modules=['attr', 'v_latents'],
-        modules_to_freeze=[]):
+        modules_to_freeze=[],
+        fusion_activation_fn=torch.nn.Identity()):
     """
     Set up the global workspace model.
     
@@ -508,6 +514,7 @@ def setup_global_workspace(
         optim_lr=lr,
         optim_weight_decay = config.training.optim.weight_decay,
         scheduler=get_scheduler,
+        fusion_activation_function=fusion_activation_fn
     )
 
     global_workspace.domain_mods["v_latents"].freeze()
@@ -620,7 +627,8 @@ def train_global_workspace(
     custom_weights=None,
     noise=None,
     modules=['attr', 'v_latents'],
-    modules_to_freeze=[]):
+    modules_to_freeze=[],
+    fusion_activation_fn=torch.nn.Identity()):
     """
     Train a global workspace model with the given configuration.
     
@@ -660,7 +668,8 @@ def train_global_workspace(
         custom_weights=custom_weights,
         noise=noise,
         modules=modules,
-        modules_to_freeze=modules_to_freeze)
+        modules_to_freeze=modules_to_freeze,
+        fusion_activation_fn=fusion_activation_fn)
     
     # 3. Set up logger and callbacks
     logger, callbacks, checkpoint_dir = setup_logger_and_callbacks(config, experiment_name, project_name, switch_epoch)

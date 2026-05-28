@@ -8,7 +8,7 @@ torch.autograd.set_detect_anomaly(True)
 if __name__ == "__main__":
 
     project_name = "syn"
-    condition = "3mod_cselc"
+    condition = "3mod_basic_s126_a11"
     data = "biased_00"
     switch_epoch = 0
 
@@ -16,6 +16,7 @@ if __name__ == "__main__":
     modules_to_freeze = []
     load_from_checkpoint = False
     gw_checkpoint_path = None
+    fusion_activation_fn = torch.tanh
 
     clean_names = [m.replace("_", "") for m in sorted(modules)]
     config_filename = f"{'_'.join(clean_names)}.yaml"
@@ -27,60 +28,16 @@ if __name__ == "__main__":
 
     config.dataset.path = f"{ROOT_PATH}/simple_shapes_dataset_{data}"
     config.training.batch_size = 2056
-    config.seed = 0
+    config.seed = 126
 
     apply_custom_init = True
 
     custom_hparams = {
         "temperature": 1,
-        "alpha": 1
+        "alpha": 1.1
     }
 
-    custom_weights = {
-    # --- DEMI-CYCLE (Reconstruction directe) ---
-    'demi_cycle_attr': 1.0,
-    'demi_cycle_color': 1.0,
-    'demi_cycle_v_latents': 1.0,
-
-    # --- TRANSLATIONS (N-to-1) ---
-    # Cible: ATTR
-    'translation_color_to_attr': 1.0,
-    'translation_v_latents_to_attr': 1.0,
-    'translation_color/v_latents_to_attr': 1.0,
-
-    # Cible: COLOR
-    'translation_attr_to_color': 1.0,
-    'translation_v_latents_to_color': 1.0,
-    'translation_attr/v_latents_to_color': 1.0,
-
-    # Cible: V_LATENTS
-    'translation_attr_to_v_latents': 1.0,
-    'translation_color_to_v_latents': 1.0,
-    'translation_attr/color_to_v_latents': 1.0,
-
-    # --- CYCLES (1-through-N) ---
-    # Source: ATTR
-    'cycle_attr_through_color': 1.0,
-    'cycle_attr_through_v_latents': 1.0,
-    'cycle_attr_through_color/v_latents': 1.0,
-
-    # Source: COLOR
-    'cycle_color_through_attr': 1.0,
-    'cycle_color_through_v_latents': 1.0,
-    'cycle_color_through_attr/v_latents': 1.0,
-
-    # Source: V_LATENTS
-    'cycle_v_latents_through_attr': 1.0,
-    'cycle_v_latents_through_color': 1.0,
-    'cycle_v_latents_through_attr/color': 1.0,
-
-    # --- CONTRASTIVE (Pairs) ---
-    'contrastive_attr_and_color': 1.0,
-    'contrastive_attr_and_v_latents': 1.0,
-    'contrastive_color_and_v_latents': 1.0,
-}
-
-
+    custom_weights = {}
 
     noise = {"mean": 1.0, "std": 0.0}
 
@@ -110,5 +67,6 @@ if __name__ == "__main__":
         custom_weights=custom_weights,
         noise=noise,
         modules=modules,
-        modules_to_freeze=modules_to_freeze
+        modules_to_freeze=modules_to_freeze,
+        fusion_activation_fn=fusion_activation_fn
     )
