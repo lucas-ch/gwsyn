@@ -8,8 +8,8 @@ torch.autograd.set_detect_anomaly(True)
 if __name__ == "__main__":
 
     project_name = "syn"
-    condition = "3mod_basic_s126_a11"
-    data = "biased_00"
+    condition = "3mod_basic_s30"
+    data = "form_50_35_15_cgc_0_20"
     switch_epoch = 0
 
     modules = ['attr', 'v_latents', 'color']
@@ -28,13 +28,13 @@ if __name__ == "__main__":
 
     config.dataset.path = f"{ROOT_PATH}/simple_shapes_dataset_{data}"
     config.training.batch_size = 2056
-    config.seed = 126
+    config.seed = 30
 
     apply_custom_init = True
 
     custom_hparams = {
         "temperature": 1,
-        "alpha": 1.1
+        "alpha": 0.5
     }
 
     custom_weights = {}

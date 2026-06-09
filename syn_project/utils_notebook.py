@@ -38,162 +38,6 @@ from sklearn.preprocessing import StandardScaler
 
 CAT2IDX = {"Diamond": 0, "Egg": 1, "Triangle": 2}
 
-def get_image_from_interactive_attr(cat, x, y, size, rot, color_r, color_g, color_b):
-    fig, ax = plt.subplots(figsize=(32, 32), dpi=1)
-    # The dataset generatoion tool has function to generate a matplotlib shape
-    # from the attributes. 
-    generate_image(
-        ax,
-        CAT2IDX[cat],
-        [int(x * 18 + 7), int(y * 18 + 7)],
-        size * 7 + 7,
-        rot * 2 * math.pi,
-        np.array([color_r * 255, color_g * 255, color_b * 255]),
-        imsize=32,
-    )
-    ax.set_facecolor("black")
-    plt.tight_layout(pad=0)
-    # Return this as a PIL Image.
-    # This is to have the same dpi as saved images
-    # otherwise matplotlib will render this in very high quality
-    buf = io.BytesIO()
-    fig.savefig(buf)
-    buf.seek(0)
-    image = Image.open(buf)
-    plt.close(fig)
-    return image
-
-def get_decoded_image_from_interactive_attr(cat, x, y, size, rot, color_r, color_g, color_b, training_params, device, global_workspace):
-    exclude_colors = training_params["exclude_colors"]
-    category = one_hot(torch.tensor([CAT2IDX[cat]]), 3)
-    rotx = math.cos(rot * 2 * math.pi)
-    roty = math.sin(rot * 2 * math.pi)
-    
-    attributes = torch.tensor(
-        [[x * 2 - 1, y * 2 - 1, size * 2 - 1, rotx, roty, ]]
-    )
-
-    if not exclude_colors:
-        attributes = torch.tensor(
-            [[x * 2 - 1, y * 2 - 1, size * 2 - 1, rotx, roty, color_r * 2 - 1, color_g * 2 - 1, color_b * 2 - 1]]
-        )
-
-    samples = [category.to(device), attributes.to(device)]
-    attr_gw_latent = global_workspace.gw_mod.encode({"attr": global_workspace.encode_domain(samples, "attr")})
-    gw_latent = global_workspace.gw_mod.fuse(
-        attr_gw_latent, {"attr": torch.ones(attr_gw_latent["attr"].size(0)).to(device)}
-    )
-    decoded_latents = global_workspace.gw_mod.decode(attr_gw_latent['attr'])["v_latents"]
-    decoded_images = (
-        global_workspace.domain_mods["v_latents"]
-        .decode_images(decoded_latents)[0]
-        .permute(1, 2, 0)
-        .detach()
-        .cpu()
-        .numpy()
-    )
-
-    return decoded_images
-
-def get_decoded_images_from_gw_latent(
-        gw_latent:Mapping[frozenset[str], torch.Tensor],
-        global_workspace:GlobalWorkspace2Domains):
-    gw_latents_decoded = global_workspace.decode(gw_latent, ["v_latents", "attr"])
-    visual_module = cast(VisualLatentDomainModule, global_workspace.domain_mods["v_latents"])
-    images = visual_module.decode_images(gw_latents_decoded["v_latents"]).detach().cpu()
-
-    return images
-
-def plot_interactive(image, decoded_image):
-    fig, axes = plt.subplots(1, 2)
-    axes[0].set_facecolor("black")
-    axes[0].set_title("Original image from attributes")
-    axes[0].set_xticks([])
-    axes[0].set_yticks([])
-    axes[0].imshow(image)
-
-    # normalize the attribute for the global workspace.
-    axes[1].imshow(decoded_image)
-    axes[1].set_xticks([])
-    axes[1].set_yticks([])
-    axes[1].set_title("Translated image through GW")
-    plt.show()
-
-import matplotlib.patches as patches
-
-import matplotlib.patches as patches
-import math
-
-def plot_img_comparison_triple_stripes(img_tensor_one: torch.Tensor, img_tensor_two: torch.Tensor, n_samples: int = 25):
-    original_np = img_tensor_one.permute(0, 2, 3, 1).detach().cpu().numpy()
-    decoded_np = img_tensor_two.permute(0, 2, 3, 1).detach().cpu().numpy()
-
-    n_samples = min(n_samples, len(original_np))
-    n_stripes = 5
-    rows = math.ceil(n_samples / n_stripes)
-
-    # 1. Création de la figure
-    fig, axes = plt.subplots(rows, n_stripes * 2, figsize=(14, 1.4 * rows), facecolor='white')
-    
-    # Force le layout pour fixer les positions avant de dessiner les bandes
-    fig.tight_layout(rect=[0.05, 0.05, 0.95, 0.95])
-
-    for s in range(n_stripes):
-        col_left = s * 2
-        col_right = s * 2 + 1
-        
-        # --- ASTUCE POUR LA LARGEUR DES BANDES ---
-        # On récupère les positions relatives des colonnes
-        # On calcule le milieu entre les stripes pour que les bandes se touchent presque
-        x_min = axes[0, col_left].get_position().x0 - 0.02
-        x_max = axes[0, col_right].get_position().x1 + 0.02
-        
-        if s % 2 == 0:
-            # On dessine un rectangle qui prend TOUTE la hauteur de la figure (0 à 1)
-            # mais seulement la largeur de la stripe (x_min à x_max)
-            rect = patches.Rectangle((x_min, 0), x_max - x_min, 1, 
-                                     transform=fig.transFigure, 
-                                     facecolor='#F2F2F2', zorder=-1)
-            fig.patches.append(rect)
-
-        for r in range(rows):
-            idx = r + (s * rows)
-            ax_orig = axes[r, col_left]
-            ax_dec = axes[r, col_right]
-
-            if idx < n_samples:
-                ax_orig.imshow(original_np[idx], cmap='gray')
-                ax_dec.imshow(decoded_np[idx], cmap='gray')
-                
-                if r == 0:
-                    ax_orig.set_title("Orig", fontsize=9, fontweight='bold')
-                    ax_dec.set_title("Dec", fontsize=9, fontweight='bold')
-            
-            ax_orig.axis('off')
-            ax_dec.axis('off')
-
-    return fig
-
-def plot_img_comparison(idx, img_tensor_one: torch.Tensor, image_tensor_two: torch.Tensor):
-    original_images_np = img_tensor_one.permute(0, 2, 3, 1).detach().cpu().numpy()
-    decoded_images_np = image_tensor_two.permute(0, 2, 3, 1).detach().cpu().numpy()
-
-    # Création d'une figure avec 1 ligne et 2 colonnes
-    fig, axes = plt.subplots(1, 2, figsize=(10, 5))
-
-    # Affichage de la prédiction
-    axes[0].imshow(original_images_np[idx])
-    axes[0].set_title(f"original (idx {idx})")
-    axes[0].axis('off') # Optionnel : enlève les axes gradués
-
-    # Affichage de la cible
-    axes[1].imshow(decoded_images_np[idx])
-    axes[1].set_title(f"decoded (idx {idx})")
-    axes[1].axis('off')
-
-    fig = plt.tight_layout() # Ajuste l'espacement entre les images
-    return fig
-
 def split_softmax_category_attributes(concat_tensor: torch.Tensor) -> list[torch.Tensor]:
     """
     Sépare un tenseur (N, 8) en deux tenseurs :
@@ -234,168 +78,6 @@ def split_binary_category_attributes(concat_tensor: torch.Tensor) -> list[torch.
     rest = concat_tensor[:, 3:]
     
     return [binary_preds, rest]
-
-def analyze_attribute_drift(original: torch.Tensor, reconstructed: torch.Tensor):
-    """
-    Calculates the average absolute difference (drift) between original and 
-    reconstructed attributes for each column.
-    """
-    # 1. Calcul de l'erreur absolue par élément
-    absolute_errors = torch.abs(original - reconstructed)
-    
-    # 2. Moyenne par colonne (dim=0)
-    mean_errors = torch.mean(absolute_errors, dim=0)
-    
-    # 3. Conversion en pourcentages
-    drift_percentages = mean_errors * 100
-    
-    # Affichage sous forme de tableau pour plus de clarté
-    df_metrics = pd.DataFrame({
-        'Attribute_Index': range(len(drift_percentages)),
-        'Mean_Absolute_Error': mean_errors.cpu().numpy(),
-        'Drift_Percentage': [f"{p:.2f}%" for p in drift_percentages.cpu().numpy()]
-    })
-    
-    return df_metrics
-
-def get_attr_orig_reconstr(global_workspace, samples):
-
-    # on regarde l'ecart entre les attributs originaux et les attributs encodés puis décodés
-    attribut = samples[frozenset(["attr"])]["attr"]
-    original_attributes = torch.cat((attribut[0], attribut[1]), dim=1)
-
-    unimodal_latents = global_workspace.encode_domains(samples)
-    gw_latents = global_workspace.encode(unimodal_latents)
-    decoded_attr = global_workspace.decode(gw_latents[frozenset({'attr'})])['attr']['attr'].detach()
-    reconstructed_attr = split_softmax_category_attributes(decoded_attr)
-    reconstructed_attr_col = torch.cat((reconstructed_attr[0], reconstructed_attr[1]), dim=1)
-
-    return original_attributes, reconstructed_attr_col
-
-def get_correlation_stats(colors, categories_indices):
-    scaler = StandardScaler()
-    model = LogisticRegression(max_iter=1000)
-
-    X = colors 
-    y = categories_indices
-
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.fit_transform(X_test)
-
-    model.fit(X_train_scaled, y_train)
-
-    y_pred = model.predict(X_test_scaled)
-
-    return {
-        "accuracy_score": accuracy_score(y_test, y_pred),
-        "classification_report": classification_report(y_test, y_pred, output_dict=True)
-    }
-
-def get_constrat_stats(colors, categories_indices):
-    n = len(categories_indices)
-    contrast = {}
-    c_sum = 0
-    for i in range(3):
-        h_stat, p_val = kruskal_colors(colors, i, categories_indices)
-        eps_sq = h_stat / ((n**2 - 1) / (n + 1))
-        contrast[i] = {"eps_sq": eps_sq, "p_value": p_val}
-        c_sum += eps_sq
-
-    contrast["mean"] = c_sum/3
-
-    return contrast
-
-def get_training_stats(project_name, experiment_name):
-    with open(f"{ROOT_PATH}/checkpoints/{project_name}/{experiment_name}/wandb/latest-run/files/wandb-summary.json", "r") as jsonfile: 
-        data = json.load(jsonfile)
-    return data
-
-def generate_summary_table(correlation_stats, constrast_stats, training_stats):
-    report = correlation_stats["classification_report"]
-    acc = correlation_stats["accuracy_score"]
-
-    eps_0 = constrast_stats[0]['eps_sq']
-    eps_1 = constrast_stats[1]['eps_sq']
-    eps_2 = constrast_stats[2]['eps_sq']
-
-    # Métrique globale : Moyenne des epsilon carrés
-    global_epsilon = constrast_stats['mean']
-
-    class_mapping = {
-        '0': 'diamant (0)',
-        '1': 'egg (1)',
-        '2': 'triangle (2)'
-    }
-    cols = [class_mapping[c] for c in ['0', '1', '2']] + ['global']
-    
-    data_dict = {
-        'precision': [report['0']['precision'], report['1']['precision'], report['2']['precision'], None],
-        'recall':    [report['0']['recall'], report['1']['recall'], report['2']['recall'], None],
-        'f1':        [report['0']['f1-score'], report['1']['f1-score'], report['2']['f1-score'], None],
-        
-        'global_accuracy':  [None, None, None, acc],
-        
-        'epsilon_squared': [eps_0, eps_1, eps_2, global_epsilon],
-        'p_value':   [constrast_stats[0]['p_value'], constrast_stats[1]['p_value'],constrast_stats[2]['p_value'], None],
-        
-        'demi_cycle_v_latents': [None, None, None, training_stats.get("val/demi_cycle_v_latents")],
-        'demi_cycle_attr':      [None, None, None, training_stats.get("val/demi_cycle_attr")],
-        'epoch':                [None, None, None, training_stats.get("epoch")],
-    }
-
-    df = pd.DataFrame(data_dict, index=cols).T
-    
-    styled_df = df.style.format(precision=3, na_rep='-')
-    
-    return styled_df
-
-def get_stats(project_name, experiment_name, n_samples_test, split="test"):
-
-    modules = get_setup_modules(project_name, experiment_name)
-    has_color_module = 'color' in modules
-
-    global_workspace = get_global_workspace(project_name, experiment_name, modules=modules)
-    data_module = get_data_module(project_name,  experiment_name, modules=modules)
-    test_samples = get_data_samples(data_module, n_samples_test, split= split)
-    data_translated = get_data_translated(global_workspace, test_samples, n_samples_test, has_color_module=has_color_module)
-
-    colors_np = get_samples_rgb(data_translated, "decoded_edge")
-    categories_indices_train = get_categories_indices(data_translated, 'train_attr')
-
-    original_attr, reconstructed_attr = get_attr_orig_reconstr(global_workspace, test_samples)
-    
-    attr_drift_stats = analyze_attribute_drift(original_attr, reconstructed_attr)
-    correlation_stats = get_correlation_stats(colors_np, categories_indices_train)
-    constrast_stats = get_constrat_stats(colors_np, categories_indices_train)
-    training_stats = get_training_stats(project_name, experiment_name)
-
-    table  = generate_summary_table(correlation_stats, constrast_stats, training_stats)
-
-    orig_subset, decoded_subset = get_top_img_per_category(data_translated)
-    fig_rgb_distrib = plot_rgb_distribution(colors_np, categories_indices_train, n_bins=50)
-    fig_original_translated = plot_original_translated_comparison(orig_subset, decoded_subset)
-
-    return {
-        "correlation_stats": correlation_stats,
-        "constrast_stats": constrast_stats,
-        "training_stats": training_stats,
-        "attr_drift_stats": attr_drift_stats,
-        "table": table,
-        "fig_rgb_distrib": fig_rgb_distrib,
-        "fig_original_translated": fig_original_translated
-        }
-
-def get_global_metrics_series(experiment_name, stats):            
-    global_metrics = {
-        'Accuracy category classification by color': stats["correlation_stats"]["accuracy_score"],
-        'Color contrast': stats["constrast_stats"]['mean'],
-        'Demi-cycle v_latents loss': stats["training_stats"].get("val/demi_cycle_v_latents"),
-        'Demi-cycle Attr loss': stats["training_stats"].get("val/demi_cycle_attr"),
-    }
-    
-    return pd.Series(global_metrics, name=experiment_name)
 
 @contextmanager
 def total_silence():
@@ -448,3 +130,321 @@ def get_n_per_category(source_tensor, current_attr, n_per_cat=10):
     
     # 4. Retourner le sous-ensemble du tenseur source
     return source_tensor[all_indices]
+
+def get_colors_labels_per_condition(condition: str, data = "biased_00", settings={"epoch": 0, "n": 100, "split":"test" }) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Charge une condition expérimentale et retourne (colors_np, labels).
+ 
+    Parameters
+    ----------
+    condition : str, identifiant de la condition
+ 
+    Returns
+    -------
+    colors_np_1 : np.ndarray (n, 3) RGB 0-255
+    colors_np_2 : np.ndarray (n, 3) RGB 0-255
+    labels    : np.ndarray (n,)   entiers de catégorie
+    """
+    experiment_name = get_experiment_name(condition, data, 0)
+    modules         = get_setup_modules('syn', experiment_name)
+    global_workspace = get_global_workspace(
+        "syn", experiment_name, epoch=settings["epoch"], modules=modules
+    )
+    data_module  = get_data_module("syn", experiment_name, modules=modules)
+    test_samples = get_data_samples(data_module, settings["n"], split=settings["split"])
+ 
+    key = frozenset({'color', 'v_latents', 'attr'})
+    original_attr      = test_samples[key]['attr']
+    original_v_latents = test_samples[key]['v_latents']
+    labels = original_attr[0].argmax(dim=1).detach().cpu().numpy()
+ 
+    gw_mod        = global_workspace.gw_mod
+    visual_module = cast(VisualLatentDomainModule, global_workspace.domain_mods["v_latents"])
+    x0 = global_workspace.encode_domains(test_samples)
+ 
+ 
+    # v_latents → attr
+    x0_v = x0[frozenset({'v_latents'})]
+    g0_v         = gw_mod.encode(x0_v)['v_latents']
+    x1    = gw_mod.decode(g0_v, domains={'attr'})
+    x1['attr'] = split_binary_category_attributes(x1['attr'])
+    t = global_workspace.encode_domains({frozenset({'attr'}): x1})
+ 
+    # attr → color
+    x1_attr = t[frozenset({'attr'})]
+    g1_attr = gw_mod.encode(x1_attr)['attr']
+    x2    = gw_mod.decode(g1_attr, domains={'color', 'v_latents'})
+    colors_x2 = x2['color'].detach().cpu().numpy()
+ 
+    # color → v_latents (fusion)
+    g2_color      = gw_mod.encode(x2)['color']
+    fusion      = 0.5 * g2_color + 0.5 * g1_attr
+    t_fused     = gw_mod.decode(fusion, domains={'v_latents'})['v_latents']
+    decoded_images = visual_module.decode_images(t_fused)
+ 
+    original_images_rgb = visual_module.decode_images(original_v_latents)
+    d          = {"train_images": original_images_rgb, "images_decoded": decoded_images}
+    colors_xvision4  = get_samples_rgb(d, "decoded_edge")
+ 
+    del original_images_rgb, decoded_images
+    torch.cuda.empty_cache()
+ 
+    return colors_x2, colors_xvision4, labels
+
+
+def run_conditions(
+    conditions: list,
+    cat_names: dict = None,
+    value: float = 0.85,
+    saturation_boost: float = 1.4,
+    plot: bool = True,
+    plots_per_row: int = 3,
+) -> pd.DataFrame:
+    """
+    Itère sur une liste de conditions, calcule F et LDA pour chacune.
+
+    Parameters
+    ----------
+    conditions    : list de valeurs passées une à une à load_fn
+    load_fn       : callable(condition) → (colors_np, labels)
+                    Doit retourner un tuple (array RGB, array labels).
+    cat_names     : dict de noms de catégories (partagé entre conditions)
+    value         : luminosité pour l'affichage
+    saturation_boost : boost de saturation pour l'affichage
+    plot          : bool, afficher les histogrammes
+    plots_per_row : int, nombre de graphes par ligne
+
+    Returns
+    -------
+    pd.DataFrame avec colonnes : condition, F, p, lda
+    """
+    results = []
+
+    if plot:
+        n = len(conditions)
+        ncols = min(plots_per_row, n)
+        nrows = (n + ncols - 1) // ncols
+        fig, axs = plt.subplots(nrows, ncols,
+                                figsize=(6 * ncols, 4 * nrows),
+                                squeeze=False)
+
+    for idx, condition in enumerate(conditions):
+        print(f"\n── Condition : {condition} ──")
+        _, colors_np, labels = get_colors_labels_per_condition(condition)
+
+        if plot:
+            row, col = divmod(idx, plots_per_row)
+            ax = axs[row][col]
+            metrics = hue_analysis(
+                colors_np, labels,
+                cat_names=cat_names,
+                value=value,
+                saturation_boost=saturation_boost,
+                title=str(condition),
+                ax=ax,
+            )
+        else:
+            metrics = compute_hue_metrics(colors_np, labels)
+            print(f"LDA = {metrics['lda_score']:.2%}")
+
+        results.append({'condition': condition, **metrics})
+
+    if plot:
+        # Masquer les axes vides si le nombre de conditions ne remplit pas la grille
+        for idx in range(len(conditions), nrows * plots_per_row):
+            row, col = divmod(idx, plots_per_row)
+            axs[row][col].set_visible(False)
+        plt.tight_layout()
+        plt.show()
+
+    return pd.DataFrame(results).set_index('condition')
+
+from typing import NamedTuple
+
+
+class ModuleDataOutputs(NamedTuple):
+    global_workspace: torch.Tensor
+    domain_mods: list
+    gw_mod: torch.nn.Module
+    visual_module: torch.nn.Module
+    original_colors: torch.Tensor
+    original_attr: torch.Tensor
+    original_v_latents: torch.Tensor
+    cat: int
+    latent_domains: dict
+    
+def get_modules_data_from_exp(experiment_name, n_samples_test=100, split='test', checkpoint_epoch=0):
+
+    modules = get_setup_modules('syn', experiment_name)
+    global_workspace = get_global_workspace("syn", experiment_name, epoch=checkpoint_epoch, modules=modules)
+    data_module = get_data_module("syn",  experiment_name, modules=modules)
+
+    test_samples = get_data_samples(data_module, n_samples_test, split=split)
+    original_colors = test_samples[frozenset({'color', 'attr', 'v_latents'})]['color']
+    original_attr = test_samples[frozenset({'color', 'attr', 'v_latents'})]['attr']
+    original_v_latents = test_samples[frozenset({'color', 'attr', 'v_latents'})]['v_latents']
+    cat = original_attr[0]
+
+    domain_mods = global_workspace.domain_mods
+    gw_mod = global_workspace.gw_mod
+    latent_domains = global_workspace.encode_domains(test_samples)
+
+    visual_module = cast(VisualLatentDomainModule, global_workspace.domain_mods["v_latents"])
+
+    return ModuleDataOutputs(
+        global_workspace=global_workspace,
+        domain_mods=domain_mods,
+        gw_mod=gw_mod,
+        visual_module=visual_module,
+        original_colors=original_colors,
+        original_attr=original_attr,
+        original_v_latents=original_v_latents,
+        cat=cat,
+        latent_domains=latent_domains
+    )   
+
+
+def get_objects_from_v_latents(latent_domains, gw_mod, global_workspace):
+    latents_source_v_latents = latent_domains[frozenset({'v_latents'})]
+
+    # à partir des latents vision, j'encode les représentations dans le gw
+    z_input = gw_mod.encode(latents_source_v_latents)['v_latents']
+
+    # je décode les attributs
+    spatial = gw_mod.decode(z_input, domains={'attr'})
+
+    # je les reformatte en attributs avec cat/autres séparés, puis je les re-encode dans la modalité attr correctement
+    spatial['attr'] = split_binary_category_attributes(spatial['attr'])
+    spatial = {frozenset({'attr'}): spatial}
+    spatial = global_workspace.encode_domains(spatial)
+
+    # à partir des attributs dérivés des v_latents, j'encode les représentation dans le gw
+    latents_source_attr_2 = spatial[frozenset({'attr'})]
+    z_spatial = gw_mod.encode(latents_source_attr_2)['attr']
+
+    color1 = gw_mod.decode(z_input, domains={'color'})
+    z_couleur = gw_mod.encode(color1)['color']
+
+    # je décode couleur et v_latents. si tout va bien les v_latents sont la version grisés de l'image, la couleur correspond à la catégorie
+    t = gw_mod.decode(z_spatial, domains={'color', 'v_latents'})
+    color2 = t['color']
+    vision1  = t['v_latents']
+
+    z_vision_2 = 0.5*z_spatial + 0.5*z_couleur
+    vision2 = gw_mod.decode(z_vision_2, domains={'v_latents'})['v_latents']
+
+    # j'encode la couleur obtenue et je la décode vers v_latents: je devrais avoir des patch colorés
+    z_syn = gw_mod.encode({'color': color2})['color']
+    t = gw_mod.decode(z_syn, domains={'v_latents'})
+    vision3 = t['v_latents']
+
+    # fusion des décodages vers v_latents: v => a => et v=> a => c => v
+    z_syn_fusion = 0.5*z_spatial + 0.5*z_syn
+    t = gw_mod.decode(z_syn_fusion, domains={'v_latents'})
+    vision4 = t['v_latents']
+
+    return {
+        'z_spatial': z_spatial,
+        'z_couleur': z_couleur,
+        'z_vision_2': z_vision_2,
+        'z_syn': z_syn,
+        'z_syn_fusion': z_syn_fusion,
+        'vision1': vision1,
+        'vision2': vision2,
+        'vision3': vision3,
+        'vision4': vision4,
+    }
+
+def get_objects_from_v_imagination(latent_domains, gw_mod, global_workspace):
+    latents_source = latent_domains[frozenset({'v_latents', 'attr', 'color'})]
+
+    # à partir des latents vision, j'encode les représentations dans le gw
+    z_spatial = gw_mod.encode(latents_source)['attr']
+    z_couleur = gw_mod.encode(latents_source)['color']
+    vision1 = gw_mod.decode(z_spatial, domains={'v_latents'})['v_latents']
+
+    z_vision_2 = 0.5*z_spatial + 0.5*z_couleur
+    vision2 = gw_mod.decode(z_vision_2, domains={'v_latents'})['v_latents']
+
+    #gw syn
+    color2 = gw_mod.decode(z_spatial, domains={'color'})
+    z_syn = gw_mod.encode(color2)['color']
+    z_syn_fusion = 0.5*(z_syn + z_spatial)
+
+    vision3 = gw_mod.decode(z_syn, domains={'v_latents'})['v_latents']
+    vision4 = gw_mod.decode(z_syn_fusion, domains={'v_latents'})['v_latents']
+
+
+    return {
+        'z_spatial': z_spatial,
+        'z_couleur': z_couleur,
+        'z_vision_2': z_vision_2,
+        'z_syn': z_syn,
+        'z_syn_fusion': z_syn_fusion,
+        'vision1': vision1,
+        'vision2': vision2,
+        'vision3': vision3,
+        'vision4': vision4,
+    }
+
+def compute_dataset_stats(dataset):
+    attr = dataset['attr'][0]    # (n, 3) one-hot
+    color = dataset['color']  # (n, 3) RGB [0,1]
+    n = attr.shape[0]
+
+    # Décoder les classes depuis le one-hot
+    classes = attr.argmax(dim=1)  # (n,)
+
+    # Noms pour l'affichage
+    class_names = {0: 'diamant', 1: 'oeuf', 2: 'triangle'}
+
+    print("=== Fréquences des classes ===")
+    for cls in range(3):
+        mask = classes == cls
+        print(f"  Classe {cls} ({class_names[cls]}): {mask.sum().item()/n:.2%}")
+
+    # Détecter les couleurs fixes par proximité RGB
+    # Rouge  ~ (255, 0, 0)   → (1.0, 0.0, 0.0)
+    # Vert   ~ (0, 255, 0)   → (0.0, 1.0, 0.0)  [HLS hue=60 → à ajuster selon tes fixed_colors]
+    # Bleu   ~ (0, 0, 255)   → (0.0, 0.0, 1.0)
+    device = color.device
+    fixed_colors_rgb = {
+        'rouge': torch.tensor([1.0, 0.0, 0.0]).to(device),
+        'vert':  torch.tensor([0.0, 1.0, 0.0]).to(device),
+        'bleu':  torch.tensor([0.0, 0.0, 1.0]).to(device),
+    }
+    threshold = 0.15  # distance L2 max pour considérer une couleur comme "fixe"
+
+    color_masks = {}
+    print("\n=== Fréquences des couleurs fixes ===")
+    for color_name, ref in fixed_colors_rgb.items():
+        dist = (color - ref).norm(dim=1)          # distance L2 pour chaque sample
+        mask = dist < threshold
+        color_masks[color_name] = mask
+        print(f"  {color_name}: {mask.sum().item()/n:.2%}")
+
+    print("\n=== Matrice conjointe P(classe, couleur) — couleurs fixes uniquement ===")
+    print(f"  {'':12}", end="")
+    for color_name in fixed_colors_rgb:
+        print(f"  {color_name:8}", end="")
+    print()
+
+    for cls in range(3):
+        print(f"  {class_names[cls]:12}", end="")
+        for color_name, color_mask in color_masks.items():
+            joint = ((classes == cls) & color_mask).sum().item()
+            print(f"  {joint/n:8.3f}", end="")
+        print()
+
+    print("\n=== P(couleur | classe) — parmi les couleurs fixes uniquement ===")
+    for cls in range(3):
+        cls_mask = classes == cls
+        n_fixed_in_cls = sum(
+            (cls_mask & cmask).sum().item() for cmask in color_masks.values()
+        )
+        print(f"  {class_names[cls]:12}", end="")
+        for color_name, color_mask in color_masks.items():
+            joint = ((cls_mask & color_mask)).sum().item()
+            p = joint / n_fixed_in_cls if n_fixed_in_cls > 0 else 0
+            print(f"  {color_name}:{p:.2%}", end="")
+        print(f"  (n_fixed={n_fixed_in_cls})")

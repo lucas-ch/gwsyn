@@ -5,23 +5,19 @@ global_workspace:
         cycles: 1
         contrastives: 1
         demi_cycles: 1
-        translations: 0
+        translations: 1
     encoders:
         hidden_dim:
-            attr: 8
-            attr_legacy_no_color: 8
             v_latents: 256
-            cat: 8
-            color: 8
+            cat: 256
+            positioncolor: 256
         n_layers: 2
 
     decoders:
         hidden_dim:
-            attr: 8
-            attr_legacy_no_color: 8
-            v_latents: 64
-            cat: 8
-            color: 8
+            v_latents: 256
+            positioncolor: 256
+            cat: 256
         n_layers: 2
 
 training:
@@ -52,12 +48,12 @@ logging:
 
 
 domains:
-    - checkpoint_path: "#{default_root_dir}/checkpoints/pretrained/domain_attr.ckpt"
-      domain_type: attr
-      args:
-          n_unpaired: "#{domain_data_args.attr.n_unpaired}"
     - checkpoint_path: "#{default_root_dir}/pretrained/domain_v.ckpt"
       domain_type: v_latents
+    - checkpoint_path: "#{default_root_dir}/checkpoints/pretrained/domain_attr.ckpt"
+      domain_type: positioncolor
+    - checkpoint_path: "#{default_root_dir}/checkpoints/pretrained/domain_attr.ckpt"
+      domain_type: cat
 
 domain_data_args:
     v_latents:
@@ -70,10 +66,14 @@ domain_proportions:
     -   domains: ["v"]
         proportion: 1.0
 
-    -   domains: ["attr"]
+    -   domains: ["v", "positioncolor", "cat"]
         proportion: 1.0
 
-    -   domains: ["v", "attr"]
+    -   domains: ["cat"]
         proportion: 1.0
+
+    -   domains: ["positioncolor"]
+        proportion: 1.0
+
 
 output_dir: "./base_params"

@@ -26,7 +26,6 @@ import torch.nn as nn
 import wandb
 from lightning.pytorch.callbacks import LearningRateMonitor, Callback
 from .utils_color_analysis import *
-from .utils_shape_loss import *
 from lightning.pytorch.loggers.wandb import WandbLogger
 from lightning.pytorch.callbacks import ModelCheckpoint
 
@@ -452,7 +451,15 @@ def setup_global_workspace(
                 args=hparams,
             )
         domains.append(domain_config)
-    
+
+    if 'positioncolor' in modules:
+        domain_config = LoadedDomainConfig(
+                domain_type=DomainModuleVariant.positioncolor,
+                checkpoint_path=checkpoint_path / "domain_attr.ckpt",
+                args=hparams,
+            )
+        domains.append(domain_config)
+
     # Create scheduler function
     def get_scheduler(optimizer: Optimizer, scheduler_type: str = "onecycle"):
         if scheduler_type == "onecycle":
@@ -649,8 +656,8 @@ def train_global_workspace(
     
     data_module = None
     if switch_epoch == 0:
-        data_module_1 = setup_data_module(REGULAR_DATASET_PATH, config, exclude_colors=exclude_colors, modules=modules)
-        data_module_2 = setup_data_module(REGULAR_DATASET_PATH, config, exclude_colors=exclude_colors, modules=modules)
+        data_module_1 = setup_data_module(config.dataset.path, config, exclude_colors=exclude_colors, modules=modules)
+        data_module_2 = setup_data_module(config.dataset.path, config, exclude_colors=exclude_colors, modules=modules)
         data_module = SequentialDataModule(data_module_1, data_module_2, switch_epoch=switch_epoch)
     if switch_epoch>0:
         data_module_1 = setup_data_module(config.dataset.path, config, exclude_colors=exclude_colors,modules=modules)
@@ -700,7 +707,7 @@ def train_global_workspace(
     # 4. Create trainer
     trainer = Trainer(
         logger=logger,
-        max_epochs=50,
+        max_epochs=20,
         default_root_dir=config.default_root_dir,
         callbacks=callbacks,
         precision=config.training.precision,

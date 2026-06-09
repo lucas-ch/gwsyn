@@ -21,6 +21,15 @@ from torchvision.utils import make_grid
 import cv2
 import numpy as np
 
+import colorsys
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+from scipy import stats
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from typing import Callable
+
+
 CAT_NAMES = {0:"diamond", 1:"egg", 2:"triangle"}
 
 
@@ -308,282 +317,6 @@ def get_attr_classification_stats(y_true:np.ndarray, y_pred: np.ndarray) -> tupl
     
     return accuracy_pct, incorrect_indices
 
-def load_epoch_files(data_dir: str) -> list[str]:
-    files = sorted(glob.glob(os.path.join(data_dir, "stats_epoch_*.npz")))
-    return files
-
-def get_color_data_from_epoch(file: str) -> tuple[int, np.ndarray, np.ndarray]:
-    """Extract info from stats_epoch_*.npz file
-    epoch: the training epoch from which the data is extracted
-    colors: list of RGB of the samples: [[0, 0, 255], [12, 12, 12], ...]
-    categories: list of catgories of the samples: [0, 2, 1, 0...]
-    """
-
-    data = np.load(file)
-    epoch = int(os.path.basename(file).split('_')[-1].replace('.npz', ''))
-    colors = data["colors_from_decoded_img"]
-    categories_raw = data["categories_from_data_attr"]
-    categories = np.argmax(categories_raw, axis=1) if categories_raw.ndim > 1 else categories_raw    
-
-    return epoch, colors, categories
-
-def get_color_data_from_epoch_files(files: list[str]) -> tuple[list[int], dict]:
-    """Extract info from stats_epoch_*.npz files
-    epochs: list of epochs
-    history: for each category, each color, the list of value {0: {'R': [255, 12, 122...], {'G': [...]}, {'B': [...]}, 1: {...}, 2:{...}}
-    """
-    epochs = []
-    history = {}
-        
-    for f in files:
-        epoch, colors, cats = get_color_data_from_epoch(f)
-        
-        epochs.append(epoch)
-        for cat in np.unique(cats):
-            if cat not in history:
-                history[cat] = {'R': [], 'G': [], 'B': []}
-            
-            cat_mask = (cats == cat)
-            mean_rgb = colors[cat_mask].mean(axis=0)
-            
-            history[cat]['R'].append(mean_rgb[0])
-            history[cat]['G'].append(mean_rgb[1])
-            history[cat]['B'].append(mean_rgb[2])
-    
-    return epochs, history
-
-def plot_color_history(
-    ax: Axes, 
-    epochs: list[int], 
-    cat_id: int, 
-    channels: dict[str, np.ndarray], 
-    cat_names: Optional[dict[int, str]], 
-    vline_epoch: Optional[int]
-) -> Axes:
-    """
-    Trace l'évolution temporelle des intensités moyennes R, G, B pour une catégorie spécifique.
-
-    Args:
-        ax: L'objet Axes de matplotlib sur lequel tracer le graphique.
-        epochs: Liste ou tableau des indices d'époques (axe X).
-        cat_id: Identifiant numérique de la catégorie à tracer.
-        channels: Dictionnaire contenant les vecteurs d'intensité {'R': [...], 'G': [...], 'B': [...]}.
-        cat_names: Dictionnaire optionnel de correspondance {id: "Nom"}.
-        vline_epoch: Époque optionnelle où tracer une ligne verticale (ex: switch d'architecture).
-
-    Returns:
-        L'objet Axes configuré et complété.
-    """
-    
-    colors_palette = ['#e74c3c', '#2ecc71', '#3498db']
-
-    name = cat_names.get(cat_id, f"Catégorie {cat_id}") if cat_names else f"Catégorie {cat_id}"
-        
-    ax.plot(epochs, channels['R'], color=colors_palette[0], label='Red', linewidth=2)
-    ax.plot(epochs, channels['G'], color=colors_palette[1], label='Green', linewidth=2)
-    ax.plot(epochs, channels['B'], color=colors_palette[2], label='Blue', linewidth=2)
-        
-    if vline_epoch is not None:
-        ax.axvline(x=vline_epoch, color='black', linestyle='--', linewidth=1.5, alpha=0.8, 
-                   label=f'Switch @ {vline_epoch}')
-        
-    ax.set_title(f"Color evolution : {name.upper()}", fontweight='bold')
-    ax.set_ylabel("Average intensity (0-255)")
-    ax.grid(True, linestyle='--', alpha=0.4)
-    
-    ax.set_ylim(0, 255)
-    ax.legend(loc='upper right', fontsize='small')
-
-    ax.xaxis.set_major_locator(MultipleLocator(50))
-
-    return ax
-
-def plot_color_evolution_per_category(
-    data_dir: str, 
-    cat_names: dict[int, str] = CAT_NAMES, 
-    vline_epoch: Optional[int] = None
-) -> Figure:
-    files: list[str] = load_epoch_files(data_dir)
-    epochs, history = get_color_data_from_epoch_files(files)
-
-    n_cats: int = len(history)
-    fig, axes = plt.subplots(n_cats, 1, figsize=(10, 3 * n_cats), sharex=True)
-    
-    if n_cats == 1: 
-        axes = [axes]
-
-    for i, (cat_id, channels) in enumerate(sorted(history.items())):
-        ax = axes[i]
-        plot_color_history(ax, epochs, cat_id, channels, cat_names, vline_epoch)
-
-    axes[-1].set_xlabel("Epoch", fontweight='bold')
-    
-    plt.tight_layout()
-    return fig
-
-def plot_statistical_dominance_evolution(
-    results_dict: dict[str, list[dict[str, any]]], 
-    cat_names: Optional[dict[int, str]] = None, 
-    vline_epoch: Optional[int] = None
-) -> Figure:
-    
-    df_k = pd.DataFrame(results_dict["kruskal"]).rename(columns={'f_stat': 'h_stat'})
-    df_d = pd.DataFrame(results_dict["dunn"])
-    df = pd.merge(df_k, df_d, on=['epoch', 'category']).sort_values(['category', 'epoch'])
-    
-    # --- CALCUL DE L'ÉCHELLE COMMUNE ---
-    # On trouve le max global pour fixer la limite Y identique sur tous les graphes
-    y_max_global = df['h_stat'].max() * 1.15  # +15% de marge pour la lisibilité
-    # ------------------------------------
-    
-    unique_cats = sorted(df['category'].unique())
-    n_cats = len(unique_cats)
-    
-    color_map = {'R': '#e74c3c', 'G': '#2ecc71', 'B': '#3498db', 'None': '#95a5a6'}
-
-    # On peut aussi ajouter sharey=True ici, mais le réglage manuel ci-dessous est plus précis
-    fig, axes = plt.subplots(n_cats, 1, figsize=(10, 3 * n_cats), sharex=True)
-    if n_cats == 1: axes = [axes]
-
-    for i, cat in enumerate(unique_cats):
-        ax = axes[i]
-        cat_data = df[df['category'] == cat]
-        cat_label = cat_names.get(cat, f"Category {cat}") if cat_names else f"Category {cat}"
-        
-        ax.plot(cat_data['epoch'], cat_data['h_stat'], 
-                color='black', alpha=0.15, linewidth=1, zorder=1)
-        
-        point_colors = [color_map.get(row['dominant_color'], '#95a5a6') 
-                        if row['is_dominant'] else '#95a5a6' 
-                        for _, row in cat_data.iterrows()]
-        
-        ax.scatter(cat_data['epoch'], cat_data['h_stat'], 
-                   c=point_colors, s=8, edgecolors='none', zorder=2)
-
-        # --- APPLICATION DE L'ÉCHELLE COMMUNE ---
-        ax.set_ylim(0, y_max_global)
-        # ----------------------------------------
-
-        ax.set_title(f"Statistical bias (H-Stat) : {cat_label.upper()}", fontweight='bold', loc='left')
-        ax.set_ylabel("Bias intensity")
-        ax.grid(True, linestyle=':', alpha=0.4)
-        
-        if vline_epoch is not None:
-            ax.axvline(x=vline_epoch, color='black', linestyle='--', alpha=0.6)
-
-    axes[-1].set_xlabel("Epoch", fontweight='bold')
-    axes[-1].xaxis.set_major_locator(MultipleLocator(50))
-    
-    legend_elements = [
-        Line2D([0], [0], color='#e74c3c', lw=0, marker='o', label='Dominant color: red'),
-        Line2D([0], [0], color='#2ecc71', lw=0, marker='o', label='Dominant color: green'),
-        Line2D([0], [0], color='#3498db', lw=0, marker='o', label='Dominant color: blue'),
-        Line2D([0], [0], color='#95a5a6', lw=0, marker='o', label='No dominant color')
-    ]
-    fig.legend(handles=legend_elements, loc='upper center', ncol=4, bbox_to_anchor=(0.5, 0.98), frameon=False)
-
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-    return fig
-
-def kruskal_colors(
-    colors: np.ndarray, 
-    category_to_analyze: int, 
-    categories: np.ndarray
-) -> stats._stats_py.KruskalResult:
-    """
-    Performs a Kruskal-Wallis H-test as a non-parametric alternative to ANOVA, 
-    testing if the median distributions of R, G, and B channels differ.
-
-    Parameters:
-        colors: Array of RGB values of the samples (N, 3).
-        category: The specific category ID to analyze.
-        categories: Array of category labels for the samples (N,).
-    """
-    cat_colors = colors[categories == category_to_analyze]
-    
-    r = cat_colors[:, 0]
-    g = cat_colors[:, 1]
-    b = cat_colors[:, 2]
-    
-    return stats.kruskal(r, g, b)
-
-def dunn_colors(
-    colors: np.ndarray, 
-    cat: int, 
-    cats: np.ndarray
-) -> Tuple[str, bool, pd.DataFrame]:
-    """
-    Performs a Dunn post-hoc test with Bonferroni correction to identify if 
-    one specific color channel statistically dominates the others.
-    """ 
-    cat_colors = colors[cats == cat]
-    if len(cat_colors) < 5:
-        return "Insuffisant", False
-
-    data = [cat_colors[:, 0], cat_colors[:, 1], cat_colors[:, 2]]
-    
-    p_matrix = sp.posthoc_dunn(data, p_adjust='bonferroni')
-    p_matrix.columns = ['R', 'G', 'B']
-    p_matrix.index = ['R', 'G', 'B']
-
-    means = np.mean(cat_colors, axis=0)
-    channels = ['R', 'G', 'B']
-    dom_idx = np.argmax(means)
-    dom_name = channels[dom_idx]
-
-    others = [c for c in channels if c != dom_name]
-    is_dominant = all(p_matrix.loc[dom_name, other] < 0.05 for other in others)
-
-    return dom_name, is_dominant, p_matrix
-
-def color_statisitical_dominance_analysis(
-    data_dir: str
-) -> dict[str, list[dict[str, any]]]:
-    """
-    Iterates through epoch files to perform Kruskal-Wallis and Dunn post-hoc tests 
-    for every category. Aggregates statistical metrics and dominance data into 
-    a structured dictionary for downstream visualization.
-
-    Parameters:
-        data_dir: Path to the directory containing the .npz epoch files.
-
-    Returns:
-        A dictionary with two keys:
-            - "kruskal": List of records containing H-stats and p-values.
-            - "dunn": List of records containing dominant color names and p-matrices.
-    """
-    files = load_epoch_files(data_dir)
-    kruskal = []
-    dunn = []
-    
-    for f in files:
-        epoch, colors, cats = get_color_data_from_epoch(f)
-        
-        for cat in np.unique(cats):
-            h_stat, p_val = kruskal_colors(colors, cat, cats)
-            dom_name, is_dominant, p_matrix = dunn_colors(colors, cat, cats)
-
-            dunn.append({
-                "epoch": epoch,
-                "category": cat,
-                "dominant_color": dom_name,
-                "is_dominant": is_dominant,
-                "p_matrix": p_matrix}
-                )
-            
-            kruskal.append({
-                "epoch": epoch,
-                "category": cat,
-                "h_stat": h_stat,
-                "p_val": p_val,
-                "significant": p_val < 0.05
-            })
-
-    return {
-        "kruskal": kruskal,
-        "dunn": dunn
-    }
-
 def get_top_img_per_category(results, n = 10):
     attr = results["attr_decoded"]
     categories = torch.argmax(attr[:, :3], dim=1)
@@ -608,29 +341,32 @@ def get_grid_numpy(samples, nrow=10):
     grid = make_grid(samples, nrow=nrow, pad_value=1).permute(1, 2, 0)
     return grid.detach().cpu().numpy()
 
-def plot_original_translated_comparison(original_images, result_images, max_images=30):
+
+def plot_original_translated_comparison(original_images, result_images, max_images=30, nrow=10):
     num_to_show = min(len(original_images), max_images)
     orig_subset = original_images[:num_to_show]
-    res_subset = result_images[:num_to_show]    
-    
-    grid_train = get_grid_numpy(orig_subset)
-    grid_decoded = get_grid_numpy(res_subset)
+    res_subset  = result_images[:num_to_show]
 
-    # 1. On retire "constrained_layout" pour éviter le conflit
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4)) 
+    grid_train   = get_grid_numpy(orig_subset, nrow=nrow)
+    grid_decoded = get_grid_numpy(res_subset,  nrow=nrow)
 
-    ax1.imshow(grid_train)
-    ax1.set_title("Images originales")
+    # Taille de figure basée sur les dimensions réelles des grilles en pixels
+    dpi          = 100
+    grid_h, grid_w = grid_train.shape[:2]
+    fig_w        = (grid_w * 2) / dpi        # 2 grilles côte à côte
+    fig_h        = (grid_h + 30) / dpi       # +30px pour le titre
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(fig_w, fig_h), dpi=dpi)
+
+    ax1.imshow(grid_train, interpolation='nearest')
+    ax1.set_title("Images originales", fontsize=10)
     ax1.axis('off')
 
-    ax2.imshow(grid_decoded)
-    ax2.set_title("Images traduites")
+    ax2.imshow(grid_decoded, interpolation='nearest')
+    ax2.set_title("Images traduites", fontsize=10)
     ax2.axis('off')
 
-    # 2. On ajuste manuellement : top/bottom gèrent les espaces blancs verticaux
-    # wspace gère l'espace entre les deux colonnes
-    fig.subplots_adjust(top=0.95, bottom=0.05, right=0.98, left=0.02, wspace=0.05)
-
+    fig.subplots_adjust(top=0.92, bottom=0.0, right=1.0, left=0.0, wspace=0.05)
     return fig
 
 def plot_original_color_comparison(original_images, colors_tensor, max_images=30):
@@ -661,7 +397,7 @@ def plot_original_color_comparison(original_images, colors_tensor, max_images=30
 
 def get_samples_rgb(
     data_translated: Dict[str, any], 
-    type: Literal['training', 'decoded', 'decoded_edge'] = 'training'
+    type: Literal['training', 'decoded', 'decoded_edge'] = 'decoded_edge'
 ) -> np.ndarray:
     """
     Extracts and aggregates color information from different image sources within the dataset.
@@ -713,3 +449,181 @@ def get_categories_indices(data_translated: dict[str, torch.Tensor], attr_type =
     categories_indices = categories_from_decoded_attr.argmax(dim=1).detach().cpu().numpy()
 
     return categories_indices
+
+"""
+color_analysis.py
+─────────────────
+Mesures de cohérence colorimétrique par catégorie.
+
+Fonctions publiques
+───────────────────
+  compute_hue_metrics(colors_np, labels)
+      → dict  {'F': float, 'p': float, 'lda': float}
+
+  hue_analysis(colors_np, labels, ...)
+      Affiche les métriques + histogramme de teinte.
+
+  run_conditions(conditions, load_fn, ...)
+      Itère sur une liste de conditions, appelle load_fn pour chacune,
+      retourne un DataFrame de métriques.
+"""
+
+
+
+# ── Utilitaires internes ───────────────────────────────────────────────────────
+
+def rgb_to_hue(rgb_array: np.ndarray) -> np.ndarray:
+    """Array (n, 3) RGB 0-255  →  array (n,) teinte H en degrés 0-360."""
+    return np.array([
+        colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)[0] * 360
+        for r, g, b in rgb_array
+    ])
+
+def circular_mean_deg(angles_deg: np.ndarray) -> float:
+    """Moyenne circulaire en degrés."""
+    rad = np.deg2rad(angles_deg)
+    return float(np.rad2deg(np.arctan2(np.sin(rad).mean(), np.cos(rad).mean())) % 360)
+
+def circular_std_deg(angles_deg: np.ndarray) -> float:
+    """Écart-type circulaire en degrés (Mardia & Jupp)."""
+    rad = np.deg2rad(angles_deg)
+    R   = np.sqrt(np.sin(rad).mean() ** 2 + np.cos(rad).mean() ** 2)
+    return float(np.rad2deg(np.sqrt(-2 * np.log(R))))
+
+def hue_to_sin_cos(hues_deg: np.ndarray) -> np.ndarray:
+    """Encode la teinte en (sin, cos) pour respecter la circularité."""
+    rad = np.deg2rad(hues_deg)
+    return np.stack([np.sin(rad), np.cos(rad)], axis=1)
+
+def boost_color(rgb_0_1: np.ndarray, value: float, saturation_boost: float):
+    """Force la luminosité V et booste la saturation en conservant la teinte."""
+    h, s, v = colorsys.rgb_to_hsv(*rgb_0_1)
+    s = min(1.0, s * saturation_boost)
+    return colorsys.hsv_to_rgb(h, s, value)
+
+
+# ── API publique ───────────────────────────────────────────────────────────────
+
+def compute_hue_metrics(
+    colors_np: np.ndarray,
+    labels: np.ndarray,
+    cat_names: dict | None = None,
+) -> dict:
+    """
+    Calcule les métriques circulaires sur les teintes.
+ 
+    Returns
+    -------
+    dict avec les clés :
+        kruskal_H, kruskal_p, lda_score,
+        per_cat : {cat_id: {'mean_hue', 'std_hue', 'name'}}
+    """
+    cats  = np.unique(labels)
+    hues  = rgb_to_hue(colors_np)
+    if cat_names is None:
+        cat_names = {c: f'Cat. {c}' for c in cats}
+ 
+    # LDA sur (sin H, cos H)
+    X         = hue_to_sin_cos(hues)
+    lda_score = LinearDiscriminantAnalysis().fit(X, labels).score(X, labels)
+ 
+    # Kruskal-Wallis sur teintes "dépliées" autour de la moyenne globale
+    global_mean = circular_mean_deg(hues)
+ 
+    def wrap_around_mean(h: np.ndarray, ref: float) -> np.ndarray:
+        return (h - ref + 180) % 360 - 180
+ 
+    groups_wrapped       = [wrap_around_mean(hues[labels == c], global_mean) for c in cats]
+    H_stat, p_kruskal    = stats.kruskal(*groups_wrapped)
+ 
+    per_cat = {
+        c: {
+            'name':     cat_names.get(c, f'Cat. {c}'),
+            'mean_hue': circular_mean_deg(hues[labels == c]),
+            'std_hue':  circular_std_deg(hues[labels == c]),
+        }
+        for c in cats
+    }
+ 
+    return {
+        'kruskal_H': H_stat,
+        'kruskal_p': p_kruskal,
+        'lda_score': lda_score,
+        'per_cat':   per_cat,
+        'hues':      hues,          # conservé pour la visualisation
+        'labels':    labels,
+    }
+
+
+def hue_analysis(
+    colors_np: np.ndarray,
+    labels: np.ndarray,
+    cat_names: dict = None,
+    value: float = 0.85,
+    saturation_boost: float = 1.4,
+    title: str = None,
+    ax=None,
+) -> dict:
+    """
+    Affiche l'histogramme de teinte par catégorie + métriques F et LDA.
+
+    Parameters
+    ----------
+    colors_np        : array (n, 3) RGB 0-255
+    labels           : array (n,) entiers de catégorie
+    cat_names        : dict {0: 'Nom', 1: 'Nom', ...}  (optionnel)
+    value            : float 0-1, luminosité forcée pour l'affichage
+    saturation_boost : float, multiplicateur de saturation
+    title            : str, titre du graphe (optionnel)
+    ax               : matplotlib Axes existant (optionnel)
+
+    Returns
+    -------
+    dict {'F': float, 'p': float, 'lda': float}
+    """
+    cats = np.unique(labels)
+    hues = rgb_to_hue(colors_np)
+
+    if cat_names is None:
+        cat_names = {c: f'Cat. {c}' for c in cats}
+
+    mean_rgb = {
+        c: boost_color(
+            colors_np[labels == c].mean(axis=0) / 255,
+            value=value,
+            saturation_boost=saturation_boost,
+        )
+        for c in cats
+    }
+
+    metrics = compute_hue_metrics(colors_np, labels)
+    print(f"Précision LDA (H seul) : {metrics['lda_score']:.2%}")
+
+    standalone = ax is None
+    if standalone:
+        fig, ax = plt.subplots(figsize=(7, 4))
+
+    for cat in cats:
+        h = hues[labels == cat]
+        color = mean_rgb[cat]
+        label = f"{cat_names[cat]}  (moy. {h.mean():.0f}°)"
+        ax.hist(h, bins=36, range=(0, 360), color=color,
+                alpha=0.6, label=label, edgecolor='none')
+        ax.axvline(h.mean(), color=color, linewidth=2, linestyle='--')
+
+    ax.set_xlabel('Teinte H (°)', fontsize=11)
+    ax.set_ylabel('Effectif', fontsize=11)
+    ax.set_xlim(0, 360)
+    ax.set_xticks(range(0, 361, 60))
+    ax.grid(True, linewidth=0.4, alpha=0.4)
+    ax.set_axisbelow(True)
+    ax.legend(fontsize=9, framealpha=0.6)
+
+    plot_title = title or f"LDA = {metrics['lda_score']:.1%}"
+    ax.set_title(plot_title, fontsize=11)
+
+    if standalone:
+        plt.tight_layout()
+        plt.show()
+
+    return metrics
