@@ -8,11 +8,11 @@ torch.autograd.set_detect_anomaly(True)
 if __name__ == "__main__":
 
     project_name = "syn"
-    condition = "3mod_basic_s30"
+    condition = "3mod_s60_sd"
     data = "form_50_35_15_cgc_0_20"
     switch_epoch = 0
 
-    modules = ['attr', 'v_latents', 'color']
+    modules = ['attr', 'color', 'v_latents']
     modules_to_freeze = []
     load_from_checkpoint = False
     gw_checkpoint_path = None
@@ -28,7 +28,7 @@ if __name__ == "__main__":
 
     config.dataset.path = f"{ROOT_PATH}/simple_shapes_dataset_{data}"
     config.training.batch_size = 2056
-    config.seed = 30
+    config.seed = 60
 
     apply_custom_init = True
 

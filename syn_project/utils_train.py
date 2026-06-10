@@ -198,7 +198,7 @@ class CustomFlexibleCheckpoint(Callback):
             should_save = True
 
         else:
-            if self.switch_epoch is not None and self.switch_epoch <= epoch < (self.switch_epoch + 100):
+            if self.switch_epoch > 0 and self.switch_epoch <= epoch < (self.switch_epoch + 100):
                 if (epoch - self.switch_epoch) % 10 == 0:
                     should_save = True
             else:
@@ -707,7 +707,7 @@ def train_global_workspace(
     # 4. Create trainer
     trainer = Trainer(
         logger=logger,
-        max_epochs=20,
+        max_epochs=10,
         default_root_dir=config.default_root_dir,
         callbacks=callbacks,
         precision=config.training.precision,

@@ -267,11 +267,9 @@ class ModuleDataOutputs(NamedTuple):
     domain_mods: list
     gw_mod: torch.nn.Module
     visual_module: torch.nn.Module
-    original_colors: torch.Tensor
-    original_attr: torch.Tensor
-    original_v_latents: torch.Tensor
-    cat: int
+    original_data: dict
     latent_domains: dict
+    modules_name: list
     
 def get_modules_data_from_exp(experiment_name, n_samples_test=100, split='test', checkpoint_epoch=0):
 
@@ -280,10 +278,7 @@ def get_modules_data_from_exp(experiment_name, n_samples_test=100, split='test',
     data_module = get_data_module("syn",  experiment_name, modules=modules)
 
     test_samples = get_data_samples(data_module, n_samples_test, split=split)
-    original_colors = test_samples[frozenset({'color', 'attr', 'v_latents'})]['color']
-    original_attr = test_samples[frozenset({'color', 'attr', 'v_latents'})]['attr']
-    original_v_latents = test_samples[frozenset({'color', 'attr', 'v_latents'})]['v_latents']
-    cat = original_attr[0]
+    original_data = test_samples[frozenset(modules)]
 
     domain_mods = global_workspace.domain_mods
     gw_mod = global_workspace.gw_mod
@@ -296,91 +291,64 @@ def get_modules_data_from_exp(experiment_name, n_samples_test=100, split='test',
         domain_mods=domain_mods,
         gw_mod=gw_mod,
         visual_module=visual_module,
-        original_colors=original_colors,
-        original_attr=original_attr,
-        original_v_latents=original_v_latents,
-        cat=cat,
-        latent_domains=latent_domains
+        original_data =original_data,
+        latent_domains=latent_domains,
+        modules_name= modules
     )   
 
 
-def get_objects_from_v_latents(latent_domains, gw_mod, global_workspace):
-    latents_source_v_latents = latent_domains[frozenset({'v_latents'})]
+def get_objects_from_v_latents(
+        latent_domains,
+        gw_mod,
+        global_workspace,
+        modules_name,
+        start_v=True,
+        modality_from='attr',
+        modality_through='color',
+        modality_main=['attr'],
+        modality_add='color'):
 
-    # à partir des latents vision, j'encode les représentations dans le gw
-    z_input = gw_mod.encode(latents_source_v_latents)['v_latents']
+    latents_source_1 = []
+    if start_v == True:
+        latents_source_v_latents = latent_domains[frozenset({'v_latents'})]
+        g0 = gw_mod.encode(latents_source_v_latents)['v_latents']
+        x1 = gw_mod.decode(g0, domains=modules_name)
+        if modality_from == 'attr':
+            x1[modality_from] = split_binary_category_attributes(x1[modality_from])
+            x1 = {frozenset({modality_from}): x1}
+            x1 = global_workspace.encode_domains(x1)[frozenset({modality_from})]
+        latents_source_1 = x1
+    else:
+        latents_source_1 = latent_domains[frozenset(modules_name)]
 
-    # je décode les attributs
-    spatial = gw_mod.decode(z_input, domains={'attr'})
+    g1 = gw_mod.encode(latents_source_1)
+    x2 = gw_mod.decode(g1[modality_from])
+    g2 = gw_mod.encode(x2)
 
-    # je les reformatte en attributs avec cat/autres séparés, puis je les re-encode dans la modalité attr correctement
-    spatial['attr'] = split_binary_category_attributes(spatial['attr'])
-    spatial = {frozenset({'attr'}): spatial}
-    spatial = global_workspace.encode_domains(spatial)
+    # z_vision1 : moyenne des g1[x] pour x dans modality_main
+    z_vision1 = sum(g1[m] for m in modality_main) / len(modality_main)
+    vision1 = gw_mod.decode(z_vision1, domains={'v_latents'})['v_latents']
 
-    # à partir des attributs dérivés des v_latents, j'encode les représentation dans le gw
-    latents_source_attr_2 = spatial[frozenset({'attr'})]
-    z_spatial = gw_mod.encode(latents_source_attr_2)['attr']
+    # z_vision2 : moyenne des g1[x] pour x dans modules_name
+    z_vision2 = sum(g1[m] for m in modules_name) / len(modules_name)
+    vision2 = gw_mod.decode(z_vision2, domains={'v_latents'})['v_latents']
 
-    color1 = gw_mod.decode(z_input, domains={'color'})
-    z_couleur = gw_mod.encode(color1)['color']
+    # vision3 : décodage depuis g2[modality_through]
+    x3 = gw_mod.decode(g2[modality_through], domains={'v_latents'})
+    vision3 = x3['v_latents']
 
-    # je décode couleur et v_latents. si tout va bien les v_latents sont la version grisés de l'image, la couleur correspond à la catégorie
-    t = gw_mod.decode(z_spatial, domains={'color', 'v_latents'})
-    color2 = t['color']
-    vision1  = t['v_latents']
-
-    z_vision_2 = 0.5*z_spatial + 0.5*z_couleur
-    vision2 = gw_mod.decode(z_vision_2, domains={'v_latents'})['v_latents']
-
-    # j'encode la couleur obtenue et je la décode vers v_latents: je devrais avoir des patch colorés
-    z_syn = gw_mod.encode({'color': color2})['color']
-    t = gw_mod.decode(z_syn, domains={'v_latents'})
-    vision3 = t['v_latents']
-
-    # fusion des décodages vers v_latents: v => a => et v=> a => c => v
-    z_syn_fusion = 0.5*z_spatial + 0.5*z_syn
-    t = gw_mod.decode(z_syn_fusion, domains={'v_latents'})
-    vision4 = t['v_latents']
-
-    return {
-        'z_spatial': z_spatial,
-        'z_couleur': z_couleur,
-        'z_vision_2': z_vision_2,
-        'z_syn': z_syn,
-        'z_syn_fusion': z_syn_fusion,
-        'vision1': vision1,
-        'vision2': vision2,
-        'vision3': vision3,
-        'vision4': vision4,
-    }
-
-def get_objects_from_v_imagination(latent_domains, gw_mod, global_workspace):
-    latents_source = latent_domains[frozenset({'v_latents', 'attr', 'color'})]
-
-    # à partir des latents vision, j'encode les représentations dans le gw
-    z_spatial = gw_mod.encode(latents_source)['attr']
-    z_couleur = gw_mod.encode(latents_source)['color']
-    vision1 = gw_mod.decode(z_spatial, domains={'v_latents'})['v_latents']
-
-    z_vision_2 = 0.5*z_spatial + 0.5*z_couleur
-    vision2 = gw_mod.decode(z_vision_2, domains={'v_latents'})['v_latents']
-
-    #gw syn
-    color2 = gw_mod.decode(z_spatial, domains={'color'})
-    z_syn = gw_mod.encode(color2)['color']
-    z_syn_fusion = 0.5*(z_syn + z_spatial)
-
-    vision3 = gw_mod.decode(z_syn, domains={'v_latents'})['v_latents']
-    vision4 = gw_mod.decode(z_syn_fusion, domains={'v_latents'})['v_latents']
-
+    # z_fusion : moyenne de (g1[x] pour x dans modality_main) + g2[modality_add]
+    all_fusion = [g1[m] for m in modality_main] + [g2[modality_add]]
+    z_fusion = sum(all_fusion) / len(all_fusion)
+    vision4 = gw_mod.decode(z_fusion, domains={'v_latents'})['v_latents']
 
     return {
-        'z_spatial': z_spatial,
-        'z_couleur': z_couleur,
-        'z_vision_2': z_vision_2,
-        'z_syn': z_syn,
-        'z_syn_fusion': z_syn_fusion,
+        'g1': g1,
+        'x2': x2,
+        'g2': g2,
+        'z_vision1': z_vision1,
+        'z_vision2': z_vision2,
+        'z_fusion': z_fusion,
         'vision1': vision1,
         'vision2': vision2,
         'vision3': vision3,
@@ -448,3 +416,67 @@ def compute_dataset_stats(dataset):
             p = joint / n_fixed_in_cls if n_fixed_in_cls > 0 else 0
             print(f"  {color_name}:{p:.2%}", end="")
         print(f"  (n_fixed={n_fixed_in_cls})")
+
+def logistic_probe(X: np.ndarray, y: np.ndarray, test_size: float = 0.2, random_state: int = 42) -> dict:
+    """
+    Régression logistique pour prédire y à partir de X.
+
+    Returns
+    -------
+    dict {'accuracy': float, 'report': str, 'model': LogisticRegression, 'scaler': StandardScaler}
+    """
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=test_size, random_state=random_state
+    )
+
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)  # transform uniquement, pas fit_transform
+
+    model = LogisticRegression(max_iter=1000)
+    model.fit(X_train_scaled, y_train)
+    y_pred = model.predict(X_test_scaled)
+
+    return {
+        "accuracy": accuracy_score(y_test, y_pred),
+        "report": classification_report(y_test, y_pred),
+        "model": model,
+        "scaler": scaler,
+    }
+
+def evaluate_robust_transfer(objects, category, n_per_cat=3, n_iterations=50):
+    """
+    Exécute l'évaluation n_iterations fois pour obtenir des stats robustes.
+    """
+    all_results = {"z_spatial": [], "z_couleur": [], "z_vision_2": [], "z_syn": [], "z_syn_fusion": []}
+    y = torch.argmax(category, dim=1).cpu().numpy() if category.dim() > 1 else category.cpu().numpy()
+    
+    for i in range(n_iterations):
+        for name, data in [("z_spatial", objects["g1"]['attr']), ("z_couleur", objects["g1"]['color']), ("z_vision_2", objects["z_vision2"]), ("z_syn", objects["g2"]['color']), ("z_syn_fusion", objects["z_fusion"])]:
+            X = data.detach().cpu().numpy()
+
+            train_size = n_per_cat*3/1000
+            
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, train_size=train_size, stratify=y
+            )
+
+            scaler = StandardScaler()
+            X_train = scaler.fit_transform(X_train)   # fit sur train seulement
+            X_test  = scaler.transform(X_test)        # transform sur test
+            
+            clf = LogisticRegression(max_iter=1000, solver='lbfgs')
+            clf.fit(X_train, y_train)
+            
+            all_results[name].append(clf.score(X_test, y_test))
+
+    stats = {}
+    for name in all_results:
+        scores = np.array(all_results[name])
+        stats[name] = {
+            "mean": np.mean(scores),
+            "std": np.std(scores),
+            "ci_95": 1.96 * np.std(scores) / np.sqrt(n_iterations)
+        }
+        
+    return stats

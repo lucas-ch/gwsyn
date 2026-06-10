@@ -563,27 +563,9 @@ def hue_analysis(
     saturation_boost: float = 1.4,
     title: str = None,
     ax=None,
-) -> dict:
-    """
-    Affiche l'histogramme de teinte par catégorie + métriques F et LDA.
-
-    Parameters
-    ----------
-    colors_np        : array (n, 3) RGB 0-255
-    labels           : array (n,) entiers de catégorie
-    cat_names        : dict {0: 'Nom', 1: 'Nom', ...}  (optionnel)
-    value            : float 0-1, luminosité forcée pour l'affichage
-    saturation_boost : float, multiplicateur de saturation
-    title            : str, titre du graphe (optionnel)
-    ax               : matplotlib Axes existant (optionnel)
-
-    Returns
-    -------
-    dict {'F': float, 'p': float, 'lda': float}
-    """
+) -> tuple[dict, plt.Figure]:
     cats = np.unique(labels)
     hues = rgb_to_hue(colors_np)
-
     if cat_names is None:
         cat_names = {c: f'Cat. {c}' for c in cats}
 
@@ -597,7 +579,6 @@ def hue_analysis(
     }
 
     metrics = compute_hue_metrics(colors_np, labels)
-    print(f"Précision LDA (H seul) : {metrics['lda_score']:.2%}")
 
     standalone = ax is None
     if standalone:
@@ -618,12 +599,44 @@ def hue_analysis(
     ax.grid(True, linewidth=0.4, alpha=0.4)
     ax.set_axisbelow(True)
     ax.legend(fontsize=9, framealpha=0.6)
-
     plot_title = title or f"LDA = {metrics['lda_score']:.1%}"
     ax.set_title(plot_title, fontsize=11)
 
     if standalone:
         plt.tight_layout()
-        plt.show()
+        plt.close(fig)  # empêche l'affichage automatique dans Jupyter
 
-    return metrics
+    return metrics, fig
+
+def plot_lda(df):
+    df = df.copy()
+    df["alpha"] = df.index.str.extract(r'a(\d+)$', expand=False).astype(int) / 10
+    df = df.sort_values("alpha")
+
+    color_lda   = "#0a304a"
+    color_chance = "#cc3333"
+
+    xticks = np.arange(0, 2.1, 0.1)
+    col   = color_lda
+    ydata = df["lda_score"]
+    label = "LDA"
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(df["alpha"], ydata,
+                linestyle="-", linewidth=2, color=col, label=label)
+
+    ax.axhline(y=0.33, color=color_chance, linewidth=1.5,
+                linestyle='--', label="Chance level (0.33)")
+
+    ax.set_xlabel("α")
+    ax.set_ylabel(label, color=col)
+    ax.tick_params(axis='y', labelcolor=col)
+    ax.set_xticks(xticks)
+    ax.set_xlim(0, 2)
+    plt.xticks(rotation=45)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best")
+    plt.title(f"{label} evolution with α")
+
+    plt.tight_layout()
+    plt.show()
