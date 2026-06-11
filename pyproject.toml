@@ -42,6 +42,7 @@ dependencies = [
     "shimmer @ file:///home/lucas/shimmer",
     "shimmer-ssd @ file:///home/lucas/shimmer-ssd",
     "simple-shapes-dataset @ file:///home/lucas/simple_shapes_dataset",
+    "pingouin (>=0.6.1,<0.7.0)",
 ]
 
 [tool.poetry.group.dev.dependencies]
