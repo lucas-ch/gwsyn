@@ -7,3 +7,4 @@ notebooks/best_model.h5
 __pycache__/
 archive
 images
+mnist
