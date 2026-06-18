@@ -1,33 +1,21 @@
 from datetime import datetime
 import os
 import pickle
-from typing import cast
-from collections.abc import Mapping
+from pathlib import Path
 
-from shimmer import ContrastiveLoss, GWLosses2Domains, GlobalWorkspace2Domains, LatentsDomainGroupT, LatentsDomainGroupsT, LossOutput, ModelModeT, RawDomainGroupsT, SelectionBase, combine_loss
-from shimmer_ssd.logging import batch_to_device
-from shimmer_ssd.modules.domains.visual import VisualLatentDomainModule
-from shimmer.utils import group_batch_size, group_device
-from simple_shapes_dataset import SimpleShapesDataModule, get_default_domains
-
-import numpy as np
+import wandb
 import torch
 from torch import nn
-
-
-from pathlib import Path
-import matplotlib.pyplot as plt
 from torch.utils.data import default_collate
-
 from lightning import LightningDataModule, Trainer
-import torch
-from shimmer_ssd.config import Config
-import torch.nn as nn
-import wandb
-from lightning.pytorch.callbacks import LearningRateMonitor, Callback
-from .utils_color_analysis import *
+from lightning.pytorch.callbacks import LearningRateMonitor, Callback, ModelCheckpoint
 from lightning.pytorch.loggers.wandb import WandbLogger
-from lightning.pytorch.callbacks import ModelCheckpoint
+
+from shimmer_ssd.config import Config
+
+from .utils_attention import *
+from .utils_custom_gw import *
+from .utils_color_analysis import *
 
 def get_project_root():
     current = Path.cwd()
@@ -38,121 +26,6 @@ def get_project_root():
 
 ROOT_PATH = get_project_root()
 REGULAR_DATASET_PATH = f"{ROOT_PATH}/simple_shapes_dataset_biased_00"
-
-class CustomSelection(SelectionBase):
-    def forward(
-        self, domains: LatentsDomainGroupT, encodings_pre_fusion: LatentsDomainGroupT
-    ) -> dict[str, torch.Tensor]:
-        """
-        Forward pass of the module.
-
-        Args:
-            domains (`LatentsDomainGroupT`): input unimodal latent representations
-            encodings_pre_fusion (`LatentsDomainGroupT`): pre-fusion domain latent
-                representation.
-
-        Returns:
-            `dict[str, torch.Tensor]`: whether the domain is selected for each input
-            in the batch.
-        """
-        selection: dict[str, torch.Tensor] = {}
-        bs = group_batch_size(domains)
-        n =len(domains.keys())
-        coef = torch.full((bs,), 1.0 / n, device=group_device(domains))
-        for domain in domains:
-            selection[domain] = coef.clone()
-        return selection
-
-class MyCustomGWLosses(GWLosses2Domains):
-    def __init__(self, gw_mod, selection_mod, domain_mods, loss_coefs, contrastive_fn, custom_weights=None, noise=None):
-        super().__init__(gw_mod, selection_mod, domain_mods, loss_coefs, contrastive_fn)
-        self.custom_weights = custom_weights
-
-    def step(
-        self,
-        raw_data: RawDomainGroupsT,
-        domain_latents: LatentsDomainGroupsT,
-        mode: ModelModeT,
-    ) -> LossOutput:        
-        metrics: dict[str, torch.Tensor] = {}
-
-        metrics.update(self.demi_cycle_loss(domain_latents, raw_data))
-        metrics.update(self.cycle_loss(domain_latents, raw_data))
-        metrics.update(self.translation_loss(domain_latents, raw_data))
-        metrics.update(self.contrastive_loss(domain_latents))
-
-        custom_weights = self.custom_weights
-
-        if len(custom_weights.items()) == 0:
-            return LossOutput(combine_loss(metrics, self.loss_coefs), metrics)
-
-        weighted_losses = []
-        for key, weight in custom_weights.items():
-            if key in metrics:
-                weighted_losses.append(metrics[key] * weight)
-
-        custom_loss = torch.stack(weighted_losses).sum()
-
-
-        return LossOutput(custom_loss, metrics)
-
-class MyGlobalWorkspace(GlobalWorkspace2Domains):
-    def __init__(
-            self,
-            domain_mods,
-            gw_encoders,
-            gw_decoders,
-            workspace_dim,
-            loss_coefs,
-            custom_weights,
-            noise,
-            fusion_activation_function = torch.nn.Identity(),
-            modules_to_freeze=[],
-            *args,
-            **kwargs):
-        kwargs.pop('fusion_activation_fn', None)
-        super().__init__(domain_mods, gw_encoders, gw_decoders, workspace_dim, loss_coefs, fusion_activation_fn=fusion_activation_function, *args, **kwargs)
-
-        contrastive_loss = ContrastiveLoss(
-                torch.tensor([1 / 0.07]).log(), "mean", False
-            )
-        
-        self.modules_to_freeze=modules_to_freeze
-        selection_mod = CustomSelection()
-        self.loss_mod = MyCustomGWLosses(
-            self.gw_mod, 
-            selection_mod, 
-            self.domain_mods, 
-            loss_coefs,
-            contrastive_loss,
-            custom_weights,
-            noise
-        )
-
-    def on_train_start(self):            
-            for name in self.modules_to_freeze:
-                if name in self.gw_mod.gw_encoders:
-                    encoder = self.gw_mod.gw_encoders[name]
-                    decoder = self.gw_mod.gw_decoders[name]
-                    
-                    # 1. Bloquer le calcul des gradients (Freeze des poids)
-                    for param in encoder.parameters():
-                        param.requires_grad = False
-                    
-                    for param in decoder.parameters():
-                        param.requires_grad = False
-
-                    # 2. Passer en mode évaluation (Désactive Dropout/BatchNorm)
-                    encoder.eval()
-                    decoder.eval()
-                    
-                    print(f"❄️ Module {name} freeze avec succès.")
-
-    def on_train_epoch_start(self):
-            for name in self.modules_to_freeze:
-                if name in self.gw_mod.gw_encoders:
-                    self.gw_mod.gw_encoders[name].eval()
-                    self.gw_mod.gw_decoders[name].eval()
 
 class SequentialDataModule(LightningDataModule):
     def __init__(self, data_module_1:LightningDataModule, data_module_2:LightningDataModule, switch_epoch:int):
@@ -221,14 +94,6 @@ def get_training_params(project_name, experiment_name):
     training_params = load_training_params_pickle(project_name,  experiment_name)
     return training_params
 
-def get_setup_modules(project_name, experiment_name):
-    training_params = get_training_params(project_name, experiment_name)
-    modules = ['attr', 'v_latents']
-    if 'good' in experiment_name:
-        modules = ['attr', 'v_latents', 'color']
-    if 'modules' in training_params.keys():
-        modules = training_params['modules']
-    return modules
 
 def get_global_workspace(project_name, experiment_name, checkpoint_path=None, epoch=0, modules=['attr', 'v_latents']):
     root_path = get_project_root()
@@ -260,55 +125,6 @@ def get_global_workspace(project_name, experiment_name, checkpoint_path=None, ep
     global_workspace.to(device)
 
     return global_workspace
-
-def get_data_module(project_name,  experiment_name, modules=['attr', 'v_latents']):
-    training_params = load_training_params_pickle(project_name,  experiment_name)
-    config = training_params["config"]
-    exclude_colors = training_params["exclude_colors"]
-
-    domain_classes = get_default_domains(modules)
-
-    root_path = get_project_root()
-
-    if str(root_path) in config.dataset.path:
-        data_path = f"{config.dataset.path}"
-    else:
-        data_path = f"{root_path}/{config.dataset.path}"
-       
-    data_module = SimpleShapesDataModule(
-        data_path,
-        domain_classes,
-        config.domain_proportions,
-        config.training.batch_size,
-        seed=config.seed,
-        domain_args=config.domain_data_args,
-        collate_fn=custom_collate_factory(exclude_colors=exclude_colors),
-    )
-
-    return data_module
-
-def get_data_samples(data_module:SimpleShapesDataModule, n_samples:int, split="train", noise = 0.0):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    train_samples = data_module.get_samples(split, n_samples)
-    train_samples = batch_to_device(train_samples, device)
-
-    if noise > 0:
-        category = train_samples[frozenset({'attr'})]["attr"][0]
-        category = category.float()
-        mean = 0.0      # Moyenne du bruit
-        std = noise     # Écart-type (plus c'est haut, plus le bruit est fort)
-
-        noise = torch.randn_like(category) * std + mean
-        category_noisy =  torch.clamp(category + noise, min=1e-8)
-
-        category_noisy_normalized = category_noisy / (category_noisy.sum(dim=-1, keepdim=True))
-
-        train_samples[frozenset({'attr'})]["attr"][0] = category_noisy_normalized
-        train_samples[frozenset({'attr', 'v_latents'})]["attr"][0] = category_noisy_normalized
-
-
-    return train_samples
 
 def init_weights(m: nn.Module, seed: int):
     """Applies Kaiming Normal initialization to Linear layers."""
@@ -455,6 +271,14 @@ def setup_global_workspace(
     if 'positioncolor' in modules:
         domain_config = LoadedDomainConfig(
                 domain_type=DomainModuleVariant.positioncolor,
+                checkpoint_path=checkpoint_path / "domain_attr.ckpt",
+                args=hparams,
+            )
+        domains.append(domain_config)
+
+    if 'action' in modules:
+        domain_config = LoadedDomainConfig(
+                domain_type=DomainModuleVariant.action,
                 checkpoint_path=checkpoint_path / "domain_attr.ckpt",
                 args=hparams,
             )
@@ -680,6 +504,7 @@ def train_global_workspace(
     
     # 3. Set up logger and callbacks
     logger, callbacks, checkpoint_dir = setup_logger_and_callbacks(config, experiment_name, project_name, switch_epoch)
+    callbacks.append(FixAttentionLR(attention_lr=global_workspace.attention_lr, attention_group_idx=1))
     
     # Log hyperparameters
     hparams_to_log = {
@@ -707,7 +532,7 @@ def train_global_workspace(
     # 4. Create trainer
     trainer = Trainer(
         logger=logger,
-        max_epochs=10,
+        max_epochs=30,
         default_root_dir=config.default_root_dir,
         callbacks=callbacks,
         precision=config.training.precision,
@@ -726,85 +551,3 @@ def train_global_workspace(
 
     
     return global_workspace, checkpoint_dir
-
-
-@torch.no_grad()
-def get_data_translated_attr(global_workspace, train_samples, n_samples=32, fusion_attr_weight=1.0, show_results_fusion=False):
-    visual_module = cast(VisualLatentDomainModule, global_workspace.domain_mods["v_latents"])
-    train_paired_samples = train_samples[frozenset(["v_latents", "attr"])]
-
-    train_images = visual_module.decode_images(train_paired_samples["v_latents"]).detach().cpu()
-    
-    if type(train_paired_samples["attr"]) == list:
-        train_attr = torch.cat((train_paired_samples["attr"][0], train_paired_samples["attr"][1]), dim=1).detach().cpu()
-    else:
-        train_attr = train_paired_samples["attr"].detach().cpu()
-
-    unimodal_latents = global_workspace.encode_domains(train_samples)
-    gw_latents = global_workspace.encode(unimodal_latents)
-
-    gw_latents_decoded = global_workspace.decode(gw_latents[frozenset({'v_latents', 'attr'})], ["v_latents", "attr"])
-
-    # Extraction et nettoyage
-    attr_decoded = gw_latents_decoded["attr"]["attr"]
-    images_decoded = visual_module.decode_images(gw_latents_decoded['attr']['v_latents']).detach().cpu()
-
-
-    result_attr = attr_decoded
-    result_images = images_decoded
-
-    torch.cuda.empty_cache()
-
-    return {
-        "train_images": train_images,
-        "train_attr": train_attr,
-        "images_decoded": result_images,
-        "attr_decoded": result_attr
-    }
-
-
-@torch.no_grad()
-def get_data_translated_attr_color(global_workspace, train_samples, n_samples=32, fusion_attr_weight=1.0, show_results_fusion=False):
-    visual_module = cast(VisualLatentDomainModule, global_workspace.domain_mods["v_latents"])
-    train_paired_samples = train_samples[frozenset(["v_latents", "attr", "color"])]
-    train_images = visual_module.decode_images(train_paired_samples["v_latents"]).detach().cpu()
-    
-    if type(train_paired_samples["attr"]) == list:
-        train_attr = torch.cat((train_paired_samples["attr"][0], train_paired_samples["attr"][1]), dim=1).detach().cpu()
-    else:
-        train_attr = train_paired_samples["attr"].detach().cpu()
-
-    unimodal_latents = global_workspace.encode_domains(train_samples)
-    gw_latents = global_workspace.encode(unimodal_latents)
-
-    z_attr = gw_latents[frozenset({'v_latents', 'attr', 'color'})]['attr']
-    x_color_from_attr = global_workspace.decode({'attr': z_attr})['attr']['color']
-
-    z_col = global_workspace.encode({'color': {'color':x_color_from_attr}})['color']['color']
-
-    z = 0.1*z_col + 0.9*z_attr
-
-    gw_latents_decoded = global_workspace.decode({'fusion': z})['fusion']
-
-    # Extraction et nettoyage
-    attr_decoded = gw_latents_decoded["attr"]
-    images_decoded = visual_module.decode_images(gw_latents_decoded['v_latents']).detach().cpu()
-
-
-    result_attr = attr_decoded
-    result_images = images_decoded
-
-    torch.cuda.empty_cache()
-
-    return {
-        "train_images": train_images,
-        "train_attr": train_attr,
-        "images_decoded": result_images,
-        "attr_decoded": result_attr
-    }
-
-def get_data_translated(global_workspace, train_samples, n_samples=32, fusion_attr_weight=1.0, show_results_fusion=False, has_color_module=False):
-    if has_color_module:
-        return get_data_translated_attr_color(global_workspace, train_samples, n_samples, fusion_attr_weight, show_results_fusion)
-    else:
-        return get_data_translated_attr(global_workspace, train_samples, n_samples, fusion_attr_weight, show_results_fusion)

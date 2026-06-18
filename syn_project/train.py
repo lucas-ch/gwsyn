@@ -8,14 +8,14 @@ torch.autograd.set_detect_anomaly(True)
 if __name__ == "__main__":
 
     project_name = "syn"
-    condition = "3mod_s60_sd"
-    data = "form_50_35_15_cgc_0_20"
+    condition = "task_att_debug2"
+    data = "biased_00"
     switch_epoch = 0
 
-    modules = ['attr', 'color', 'v_latents']
-    modules_to_freeze = []
-    load_from_checkpoint = False
-    gw_checkpoint_path = None
+    modules = ['attr', 'color', 'v_latents', 'action']
+    modules_to_freeze = ['attr', 'color', 'v_latents']
+    load_from_checkpoint = True
+    gw_checkpoint_path = "/home/lucas/gwsyn/checkpoints/syn/base_task_biased_00/checkpoints/last.ckpt"
     fusion_activation_fn = torch.tanh
 
     clean_names = [m.replace("_", "") for m in sorted(modules)]
@@ -28,7 +28,7 @@ if __name__ == "__main__":
 
     config.dataset.path = f"{ROOT_PATH}/simple_shapes_dataset_{data}"
     config.training.batch_size = 2056
-    config.seed = 60
+    config.seed = 126
 
     apply_custom_init = True
 

@@ -1,21 +1,11 @@
-from matplotlib.axes import Axes
-from matplotlib.figure import Figure
 import numpy as np
 import warnings
 import cv2
 from scipy import stats
 import torch
 import numpy as np
-import pandas as pd
-import seaborn as sns
 import matplotlib.pyplot as plt
-import torch.nn.functional as F
-import os
-import glob
-from matplotlib.ticker import MultipleLocator
-from matplotlib.lines import Line2D
-import scikit_posthocs as sp
-from typing import Dict, Literal, Optional, Tuple
+from typing import Dict, Literal
 
 from torchvision.utils import make_grid
 import cv2
@@ -24,14 +14,10 @@ import numpy as np
 import colorsys
 import numpy as np
 import matplotlib.pyplot as plt
-import pandas as pd
 from scipy import stats
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-from typing import Callable
-
 
 CAT_NAMES = {0:"diamond", 1:"egg", 2:"triangle"}
-
 
 def get_color_masks(images: torch.Tensor, s_thresh=0, v_min=0, v_max=254) -> np.ndarray:
     images_numpy = images.permute(0, 2, 3, 1).detach().cpu().numpy()
@@ -43,7 +29,6 @@ def get_color_masks(images: torch.Tensor, s_thresh=0, v_min=0, v_max=254) -> np.
         colors.append(color)
 
     return colors
-
 
 def get_color_mask(image: np.ndarray, s_thresh=50, v_min=30, v_max=225) -> np.ndarray:
     """
@@ -70,26 +55,6 @@ def get_color_mask(image: np.ndarray, s_thresh=50, v_min=30, v_max=225) -> np.nd
     color_mask = (s > s_thresh) & (v > v_min) & (v < v_max)
     
     return color_mask
-
-
-def get_color_from_attributes(data: torch.Tensor) -> torch.Tensor:
-    if data.size(dim=1) < 11:
-        raise Exception("no color in attributes") 
-    """
-    Prend un tenseur [X, 11], extrait les 3 derniers attributs (RGB)
-    et les convertit de [-1, 1] vers [0, 255].
-    """
-    # 1. Extraction des 3 dernières colonnes (indices 8, 9, 10)
-    # On utilise : pour toutes les lignes, et -3: pour les 3 dernières colonnes
-    rgb_normalized = data[:, -3:] 
-    
-    # 2. Dénormalisation de [-1, 1] -> [0, 1]
-    # .clone() évite de modifier 'data' si on fait des opérations in-place plus tard
-    rgb_01 = (rgb_normalized.clone() + 1.0) / 2.0
-    
-    # 3. Sécurité et conversion
-    rgb_01 = torch.clamp(rgb_01, 0.0, 1.0)
-    return (rgb_01 * 255).to(torch.uint8)
 
 # return r,g,b between 0 and 255 per entry in tensor
 def get_color_from_images(images: torch.Tensor, masks: np.ndarray) -> np.ndarray:
@@ -236,107 +201,6 @@ def get_color_from_image(image: np.ndarray, mask: np.ndarray, barycentre = False
             color[c] = 0.0
     return color
 
-def plot_rgb_distribution(colors_np: np.ndarray, categories_indices: np.ndarray, cat_names=CAT_NAMES, n_bins=40) -> Figure:
-    """Displays RGB distribution per category.
-
-    colors_np is an array of RGB: [[0, 0, 255], [255, 255, 0], ...]
-    categories indices is an array of categories (diamon, egg, triangle): [0, 0, 2, 1...]
-    cat_names is a dictionnary storing the names of the category indices
-    n_bins is the bins of histogram
-    """
-    unique_cats = np.unique(categories_indices)
-    n_cats = len(unique_cats)
-    channels = ['Red', 'Green', 'Blue']
-    colors_palette = ['#e74c3c', '#2ecc71', '#3498db']     
-
-    fig, axes = plt.subplots(3, n_cats, figsize=(n_cats * 2.5, 6), sharex=True, sharey=False)
-    
-    if n_cats == 1:
-        axes = axes.reshape(3, 1)
-
-    for col, cat in enumerate(unique_cats):
-        mask = (categories_indices == cat)
-        cat_data = colors_np[mask]
-        
-        name = cat_names.get(cat, f"CAT {cat}") if cat_names else f"CAT {cat}"
-        
-        for row in range(3):
-            ax = axes[row, col]
-            
-            sns.histplot(
-                cat_data[:, row], 
-                bins=n_bins, 
-                kde=True, 
-                ax=ax, 
-                color=colors_palette[row],
-                element="step",
-                alpha=0.6
-            )
-            
-            ax.set_xlim(0, 255)
-            ax.tick_params(axis='both', which='major', labelsize=8) # Petites polices
-            
-            if row == 0:
-                ax.set_title(name.upper(), fontweight='bold', fontsize=10, pad=10)
-            
-            if col == 0:
-                ax.set_ylabel(channels[row], fontweight='bold', fontsize=9)
-            else:
-                ax.set_ylabel("")
-                ax.set_yticklabels([])
-            
-            if row == 2:
-                ax.set_xlabel("")
-            else:
-                ax.set_xlabel("")
-
-            # Clean design
-            for spine in ["top", "right"]:
-                ax.spines[spine].set_visible(False)
-
-    plt.tight_layout(pad=1.0)
-    return fig
-
-def categorize_decoded_attr(decoded_attr: torch.Tensor) -> torch.Tensor:
-    """Get the category from a result of GW decoded attributes tensor.
-
-    The tensor contains category in the first 3 columns [-1.2, -2.4, 12.5]
-    categorize_decoded_attr returns corresponding one hot encoding [0, 0, 1]
-    """
-    first_three = decoded_attr[:, :3]
-    
-    indices = torch.argmax(first_three, dim=1)
-    binary_categories = F.one_hot(indices, num_classes=3)
-    
-    return binary_categories.to(torch.float32)
-
-def get_attr_classification_stats(y_true:np.ndarray, y_pred: np.ndarray) -> tuple[int, np.ndarray]:
-    correct_mask = (y_true == y_pred)
-    accuracy_pct = np.mean(correct_mask) * 100
-    incorrect_indices = np.where(~correct_mask)[0]
-    
-    return accuracy_pct, incorrect_indices
-
-def get_top_img_per_category(results, n = 10):
-    attr = results["attr_decoded"]
-    categories = torch.argmax(attr[:, :3], dim=1)
-
-    selected_orig = []
-    selected_decoded = []
-
-    for cat in range(3):
-        indices = (categories == cat).nonzero(as_tuple=True)[0]
-
-        top_indices = indices[:n].to('cpu')
-
-        selected_orig.append(results["train_images"][top_indices])
-        selected_decoded.append(results["images_decoded"][top_indices])
-
-    final_orig = torch.cat(selected_orig, dim=0)
-    final_decoded = torch.cat(selected_decoded, dim=0)
-
-    return final_orig, final_decoded
-
 def get_grid_numpy(samples, nrow=10):
     grid = make_grid(samples, nrow=nrow, pad_value=1).permute(1, 2, 0)
     return grid.detach().cpu().numpy()
@@ -367,32 +231,6 @@ def plot_original_translated_comparison(original_images, result_images, max_imag
     ax2.axis('off')
 
     fig.subplots_adjust(top=0.92, bottom=0.0, right=1.0, left=0.0, wspace=0.05)
-    return fig
-
-def plot_original_color_comparison(original_images, colors_tensor, max_images=30):
-    num_to_show = min(len(original_images), len(colors_tensor), max_images)
-    orig_subset = original_images[:num_to_show]
-    colors_subset = colors_tensor[:num_to_show]
-    
-    h, w = orig_subset.shape[2], orig_subset.shape[3]
-
-    color_squares = colors_subset.view(num_to_show, 3, 1, 1).expand(-1, -1, h, w)
-    color_squares = color_squares / 255.0
-    
-    grid_orig = get_grid_numpy(orig_subset)
-    grid_color = get_grid_numpy(color_squares)
-
-    # Affichage
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4)) 
-    ax1.imshow(grid_orig)
-    ax1.set_title("Originales")
-    ax1.axis('off')
-
-    ax2.imshow(grid_color)
-    ax2.set_title("Couleurs")
-    ax2.axis('off')
-
-    fig.subplots_adjust(top=0.95, bottom=0.05, right=0.98, left=0.02, wspace=0.05)
     return fig
 
 def get_samples_rgb(
@@ -431,47 +269,6 @@ def get_samples_rgb(
 
     return colors_np
 
-def get_categories_indices(data_translated: dict[str, torch.Tensor], attr_type = 'attr_decoded') -> np.ndarray:
-    """
-    Converts raw decoded attributes into discrete category indices.
-    
-    Args:
-        data_translated: Dictionary containing 'attr_decoded' and/or 'train_attr'(tensors of attributes with categories one-hot coded).
-        
-    Returns:
-        A NumPy array of integers representing the class index for each sample.
-    """
-
-    # Convert raw attributes (logits) into categorized form (likely via softmax internally)
-    categories_from_decoded_attr = categorize_decoded_attr(data_translated[attr_type])
-    
-    # Retrieve the index of the highest probability (Argmax) and move to CPU/NumPy for analysis
-    categories_indices = categories_from_decoded_attr.argmax(dim=1).detach().cpu().numpy()
-
-    return categories_indices
-
-"""
-color_analysis.py
-─────────────────
-Mesures de cohérence colorimétrique par catégorie.
-
-Fonctions publiques
-───────────────────
-  compute_hue_metrics(colors_np, labels)
-      → dict  {'F': float, 'p': float, 'lda': float}
-
-  hue_analysis(colors_np, labels, ...)
-      Affiche les métriques + histogramme de teinte.
-
-  run_conditions(conditions, load_fn, ...)
-      Itère sur une liste de conditions, appelle load_fn pour chacune,
-      retourne un DataFrame de métriques.
-"""
-
-
-
-# ── Utilitaires internes ───────────────────────────────────────────────────────
-
 def rgb_to_hue(rgb_array: np.ndarray) -> np.ndarray:
     """Array (n, 3) RGB 0-255  →  array (n,) teinte H en degrés 0-360."""
     return np.array([
@@ -501,8 +298,6 @@ def boost_color(rgb_0_1: np.ndarray, value: float, saturation_boost: float):
     s = min(1.0, s * saturation_boost)
     return colorsys.hsv_to_rgb(h, s, value)
 
-
-# ── API publique ───────────────────────────────────────────────────────────────
 
 def compute_hue_metrics(
     colors_np: np.ndarray,

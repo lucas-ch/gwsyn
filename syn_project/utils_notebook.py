@@ -1,26 +1,24 @@
-import io
-import math
-from typing import Mapping, cast
-import numpy as np
-from shimmer import GlobalWorkspace2Domains
-import torch
-from PIL import Image
-from torch.nn.functional import one_hot
-from shimmer_ssd.modules.domains.visual import VisualLatentDomainModule
-import torch.nn.functional as F
-import pandas as pd
-from .utils_train import *
-
-from simple_shapes_dataset.cli import generate_image
-
-import matplotlib.pyplot as plt
-
 import os
 import sys
-import numpy as np
-import json
-from contextlib import redirect_stdout, redirect_stderr, contextmanager
 import warnings
+from contextlib import redirect_stdout, redirect_stderr, contextmanager
+from typing import cast
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+from simple_shapes_dataset import SimpleShapesDataModule, get_default_domains
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report, accuracy_score
+from sklearn.preprocessing import StandardScaler
+
+import torch
+import torch.nn.functional as F
+
+from shimmer_ssd.modules.domains.visual import VisualLatentDomainModule
+from shimmer_ssd.logging import batch_to_device
 
 root_path = os.path.abspath(os.path.join('..'))
 if root_path not in sys.path:
@@ -30,13 +28,66 @@ from syn_project.utils_train import *
 from syn_project.utils_color_analysis import *
 from syn_project.utils_notebook import *
 
-from sklearn.model_selection import train_test_split
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import classification_report, accuracy_score
-from sklearn.preprocessing import StandardScaler
-
-
 CAT2IDX = {"Diamond": 0, "Egg": 1, "Triangle": 2}
+
+def get_setup_modules(project_name, experiment_name):
+    training_params = get_training_params(project_name, experiment_name)
+    modules = ['attr', 'v_latents']
+    if 'good' in experiment_name:
+        modules = ['attr', 'v_latents', 'color']
+    if 'modules' in training_params.keys():
+        modules = training_params['modules']
+    return modules
+
+
+def get_data_module(project_name,  experiment_name, modules=['attr', 'v_latents']):
+    training_params = load_training_params_pickle(project_name,  experiment_name)
+    config = training_params["config"]
+    exclude_colors = training_params["exclude_colors"]
+
+    domain_classes = get_default_domains(modules)
+
+    root_path = get_project_root()
+
+    if str(root_path) in config.dataset.path:
+        data_path = f"{config.dataset.path}"
+    else:
+        data_path = f"{root_path}/{config.dataset.path}"
+       
+    data_module = SimpleShapesDataModule(
+        data_path,
+        domain_classes,
+        config.domain_proportions,
+        config.training.batch_size,
+        seed=config.seed,
+        domain_args=config.domain_data_args,
+        collate_fn=custom_collate_factory(exclude_colors=exclude_colors),
+    )
+
+    return data_module
+
+def get_data_samples(data_module:SimpleShapesDataModule, n_samples:int, split="train", noise = 0.0):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    train_samples = data_module.get_samples(split, n_samples)
+    train_samples = batch_to_device(train_samples, device)
+
+    if noise > 0:
+        category = train_samples[frozenset({'attr'})]["attr"][0]
+        category = category.float()
+        mean = 0.0      # Moyenne du bruit
+        std = noise     # Écart-type (plus c'est haut, plus le bruit est fort)
+
+        noise = torch.randn_like(category) * std + mean
+        category_noisy =  torch.clamp(category + noise, min=1e-8)
+
+        category_noisy_normalized = category_noisy / (category_noisy.sum(dim=-1, keepdim=True))
+
+        train_samples[frozenset({'attr'})]["attr"][0] = category_noisy_normalized
+        train_samples[frozenset({'attr', 'v_latents'})]["attr"][0] = category_noisy_normalized
+
+
+    return train_samples
 
 def split_softmax_category_attributes(concat_tensor: torch.Tensor) -> list[torch.Tensor]:
     """
@@ -353,6 +404,42 @@ def get_objects_from_v_latents(
         'vision2': vision2,
         'vision3': vision3,
         'vision4': vision4,
+    }
+
+
+def get_action_from_v_latents(
+        latent_domains,
+        gw_mod,
+        global_workspace,
+        modules_name):
+    
+    # 1. Encode v_latents → GW latent space
+    latents_source_v_latents = latent_domains[frozenset({'v_latents'})]
+    g0 = gw_mod.encode(latents_source_v_latents)['v_latents']
+    
+    # 2. Decode → attr domain
+    x1 = gw_mod.decode(g0, domains=modules_name)
+    x1['attr'] = split_binary_category_attributes(x1['attr'])
+    x1 = {frozenset({'attr'}): x1}
+    
+    # 3. Re-encode attr → GW latent space
+    x1_encoded = global_workspace.encode_domains(x1)[frozenset({'attr'})]
+    g1 = gw_mod.encode(x1_encoded)['attr']
+    
+    # 4. Decode → action
+    action = gw_mod.decode(g1, domains={'action'})['action']
+    
+    # 5. Extract original category from latent_domains
+    original_latents = latent_domains[frozenset(modules_name)]
+    original_attr = original_latents['attr']
+    if isinstance(original_attr, (list, tuple)):
+        original_category = torch.argmax(original_attr[0], dim=1)
+    else:
+        original_category = torch.argmax(original_attr, dim=1)
+    
+    return {
+        'original_category': original_category,
+        'action': action,
     }
 
 def compute_dataset_stats(dataset):
