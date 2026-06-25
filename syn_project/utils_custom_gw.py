@@ -1,4 +1,5 @@
 import torch
+from torch import nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR, LRScheduler
 
@@ -65,6 +66,58 @@ class MyCustomGWLosses(GWLosses2Domains):
 
         return LossOutput(custom_loss, metrics)
 
+def remove_action_from_data(data):
+    new_data = {}
+    for key, value in data.items():
+        # Retirer 'action' de la frozenset-clé
+        new_key = frozenset(k for k in key if k != 'action')
+        # Retirer 'action' du dict de latents si présent
+        new_value = {k: v for k, v in value.items() if k != 'action'}
+        new_data[new_key] = new_value
+    return new_data
+
+class CombinedGWLosses(nn.Module):
+    def __init__(self, attention_loss: MyAttentionGWLosses, custom_loss: MyCustomGWLosses, attention_weight=1.0, custom_weight=1.0):
+        super().__init__()
+        self.attention_loss = attention_loss
+        self.custom_loss = custom_loss
+        self.attention_weight = attention_weight
+        self.custom_weight = custom_weight
+
+    @property
+    def attention(self):
+        """Délègue à MyAttentionGWLosses pour configure_optimizers."""
+        return self.attention_loss.attention
+        
+    def step(
+        self,
+        raw_data: "RawDomainGroupsT",
+        domain_latents: "LatentsDomainGroupsT",
+        mode: "ModelModeT",
+    ) -> "LossOutput":
+        out_attention = self.attention_loss.step(raw_data, domain_latents, mode)
+
+        domain_latents_custom = remove_action_from_data(
+    {k: v for k, v in domain_latents.items() if frozenset({'action'}) != k}
+)
+        raw_data_custom = remove_action_from_data(
+    {k: v for k, v in raw_data.items() if frozenset({'action'}) != k}
+)
+        out_custom = self.custom_loss.step(raw_data_custom, domain_latents_custom, mode)
+
+        combined_loss = (
+            self.attention_weight * out_attention.loss +
+            self.custom_weight * out_custom.loss
+        )
+
+        # Merge des métriques avec préfixes pour distinguer dans wandb
+        metrics = {
+            **{f"attention/{k}": v for k, v in out_attention.metrics.items()},
+            **{f"custom/{k}": v for k, v in out_custom.metrics.items()},
+        }
+
+        return LossOutput(combined_loss, metrics)
+
 class MyGlobalWorkspace(GlobalWorkspace2Domains):
     def __init__(
             self,
@@ -75,6 +128,7 @@ class MyGlobalWorkspace(GlobalWorkspace2Domains):
             loss_coefs,
             custom_weights,
             noise,
+            attention_tree_config=None,
             fusion_activation_function = torch.nn.Identity(),
             modules_to_freeze=[],
             attention_lr=1e-1,
@@ -92,14 +146,34 @@ class MyGlobalWorkspace(GlobalWorkspace2Domains):
         self.attention_lr = attention_lr
         self.attention_weight_decay = attention_weight_decay
         selection_mod = CustomSelection()
-        self.loss_mod = MyAttentionGWLosses(
-            self.gw_mod, 
-            selection_mod, 
-            self.domain_mods, 
+        attention_losses = MyAttentionGWLosses(
+            self.gw_mod,
+            selection_mod,
+            self.domain_mods,
             loss_coefs,
             contrastive_loss,
+            attention_tree_config
         )
 
+        domain_mods_custom_loss = {k: self.domain_mods[k] for k in self.domain_mods.keys() - {'action'}}
+
+        custom_losses = MyCustomGWLosses(
+            self.gw_mod,
+            selection_mod,
+            domain_mods_custom_loss,
+            loss_coefs,
+            contrastive_loss,
+            custom_weights=custom_weights,
+            noise=noise
+        )
+
+        self.loss_mod = CombinedGWLosses(
+            attention_losses,
+            custom_losses,
+            attention_weight=1.0,
+            custom_weight=1.0
+)
+        
     def configure_optimizers(self):
             attention_params = list(self.loss_mod.attention.parameters())
             attention_param_ids = {id(p) for p in attention_params}

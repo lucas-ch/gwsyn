@@ -14,7 +14,8 @@ global_workspace:
             color: 256
             cat: 256
             position: 256
-            action: 64
+            action: 256
+            task: 256
         n_layers: 2
 
     decoders:
@@ -25,7 +26,8 @@ global_workspace:
             color: 256
             cat: 256
             position: 256
-            action: 64
+            action: 256
+            task: 256
         n_layers: 2
 
 training:
@@ -81,7 +83,10 @@ domain_proportions:
     -   domains: ["action"]
         proportion: 1.0
 
-    -   domains: ["v", "color", "attr", "action"]
+    -   domains: ["task"]
+        proportion: 1.0
+
+    -   domains: ["v", "color", "attr", "action", "task"]
         proportion: 1.0
 
 output_dir: "./base_params"

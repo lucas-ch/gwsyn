@@ -97,28 +97,43 @@ def get_training_params(project_name, experiment_name):
 
 def get_global_workspace(project_name, experiment_name, checkpoint_path=None, epoch=0, modules=['attr', 'v_latents']):
     root_path = get_project_root()
-
-    training_params = get_training_params(project_name,  experiment_name)
-
+    training_params = get_training_params(project_name, experiment_name)
     exclude_colors = training_params["exclude_colors"]
+    
     gw_checkpoint_path = f"{root_path}/checkpoints/{project_name}/{experiment_name}/checkpoints/last.ckpt"
-    if checkpoint_path is not None: 
+    if checkpoint_path is not None:
         gw_checkpoint_path = checkpoint_path
-    if epoch>0:
+    if epoch > 0:
         gw_checkpoint_path = f"{root_path}/checkpoints/{project_name}/{experiment_name}/checkpoints/save-epoch={epoch}.ckpt"
 
     config = training_params["config"]
     hparams = training_params["hparams"] if "hparams" in training_params else {"temperature": 1, "alpha": 1}
     apply_custom_init = training_params["apply_custom_init"]
+    attention_tree_config = training_params["attention_tree_config"] if "hparams" in training_params else None
 
+    # Construire les arguments nécessaires à MyGlobalWorkspace
     global_workspace, domain_modules = setup_global_workspace(
         config,
         hparams,
         exclude_colors,
         apply_custom_init,
-        load_from_checkpoint = True,
-        gw_checkpoint_path = gw_checkpoint_path,
-        modules = modules
+        load_from_checkpoint=False,  # Ne pas charger ici
+        modules=modules,
+        attention_tree_config=attention_tree_config
+    )
+
+    # Charger directement via Lightning, qui gère les shape mismatches proprement
+    global_workspace = MyGlobalWorkspace.load_from_checkpoint(
+        gw_checkpoint_path,
+        strict=False,  # Ignore les clés manquantes ou en shape mismatch
+        map_location="cpu",
+        # Passer les arguments du constructeur
+        domain_mods=global_workspace.domain_mods,
+        gw_encoders=global_workspace.gw_mod.gw_encoders,
+        gw_decoders=global_workspace.gw_mod.gw_decoders,
+        workspace_dim=config.global_workspace.latent_dim,
+        loss_coefs=config.global_workspace.loss_coefficients,
+        attention_tree_config=attention_tree_config,
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -166,15 +181,6 @@ def load_training_params_pickle(project_name, experiment_name, file_path=None):
     with open(target_path, 'rb') as f:
         return pickle.load(f)
 
-
-def get_experiment_name(condition, data, switch_epoch):
-    experiment_name = f"{condition}_{data}"
-
-    if switch_epoch > 0:
-        experiment_name = f"{experiment_name}_switch_{switch_epoch}"
-
-    return experiment_name
-
 def custom_collate_factory(exclude_colors: bool):
     """Returns a collate function that optionally removes color info."""
     if not exclude_colors:
@@ -204,7 +210,8 @@ def setup_global_workspace(
         noise=None,
         modules=['attr', 'v_latents'],
         modules_to_freeze=[],
-        fusion_activation_fn=torch.nn.Identity()):
+        fusion_activation_fn=torch.nn.Identity(),
+        attention_tree_config=None):
     """
     Set up the global workspace model.
     
@@ -284,6 +291,14 @@ def setup_global_workspace(
             )
         domains.append(domain_config)
 
+    if 'task' in modules:
+        domain_config = LoadedDomainConfig(
+                domain_type=DomainModuleVariant.task,
+                checkpoint_path=checkpoint_path / "domain_attr.ckpt",
+                args=hparams,
+            )
+        domains.append(domain_config)
+
     # Create scheduler function
     def get_scheduler(optimizer: Optimizer, scheduler_type: str = "onecycle"):
         if scheduler_type == "onecycle":
@@ -345,7 +360,8 @@ def setup_global_workspace(
         optim_lr=lr,
         optim_weight_decay = config.training.optim.weight_decay,
         scheduler=get_scheduler,
-        fusion_activation_function=fusion_activation_fn
+        fusion_activation_function=fusion_activation_fn,
+        attention_tree_config= attention_tree_config
     )
 
     global_workspace.domain_mods["v_latents"].freeze()
@@ -354,9 +370,46 @@ def setup_global_workspace(
     # Load from checkpoint if provided
     if load_from_checkpoint and gw_checkpoint_path is not None:
         print(f"Loading model from checkpoint: {gw_checkpoint_path}")
-        # Load default weights
         checkpoint = torch.load(gw_checkpoint_path, map_location="cpu")
-        global_workspace.load_state_dict(checkpoint['state_dict'], strict=False)
+        full_state_dict = checkpoint['state_dict']
+
+        # On suppose que le checkpoint ne contient qu'un sous-ensemble exact des
+        # modules demandés (par ex. checkpoint = ["attr", "v_latents"] alors que
+        # modules = ["attr", "v_latents", "task", "action"]). On filtre donc le
+        # state_dict pour ne charger que les clés des encoders/decoders dont le
+        # nom de module apparaît dans le checkpoint, et on laisse les autres
+        # modules sur leurs poids initialisés par défaut (apply_custom_init).
+        present_modules = set()
+        for key in full_state_dict.keys():
+            # clés typiques: "gw_mod.gw_encoders.<module>...." / "gw_mod.gw_decoders.<module>...."
+            for prefix in ("gw_mod.gw_encoders.", "gw_mod.gw_decoders."):
+                if key.startswith(prefix):
+                    module_name = key[len(prefix):].split(".", 1)[0]
+                    present_modules.add(module_name)
+
+        all_modules = set(global_workspace.gw_mod.gw_encoders.keys())
+        missing_modules = all_modules - present_modules
+
+        SHAPE_SENSITIVE_KEYS = {
+            }
+
+        filtered_state_dict = {
+            key: value
+            for key, value in full_state_dict.items()
+            if key not in SHAPE_SENSITIVE_KEYS  # ← skip si shape dépend du nb de modules
+            and (
+                any(
+                    key.startswith(f"{prefix}{module_name}.")
+                    for prefix in ("gw_mod.gw_encoders.", "gw_mod.gw_decoders.")
+                    for module_name in present_modules
+                )
+                or not key.startswith(("gw_mod.gw_encoders.", "gw_mod.gw_decoders."))
+            )
+        }
+        missing_keys, unexpected_keys = global_workspace.load_state_dict(
+            filtered_state_dict, strict=False
+        )
+
         global_workspace.domain_mods["v_latents"].freeze()
         global_workspace.domain_mods["v_latents"].eval()
 
@@ -364,8 +417,18 @@ def setup_global_workspace(
             global_workspace.gw_mod.gw_encoders[i].eval()
             global_workspace.gw_mod.gw_decoders[i].eval()
 
-        # Reset the training state
-        print(f"Loaded default weights from {gw_checkpoint_path}")
+        # Log détaillé : quels modules viennent du checkpoint, lesquels restent
+        # en poids par défaut.
+        print(f"Modules chargés depuis le checkpoint   : {sorted(present_modules & all_modules)}")
+        print(f"Modules en poids par défaut (init)      : {sorted(missing_modules)}")
+        if unexpected_keys:
+            print(f"⚠️  Clés inattendues ignorées dans le checkpoint : {unexpected_keys}")
+        if missing_keys:
+            # missing_keys ici devrait correspondre exactement aux modules absents
+            # du checkpoint (poids par défaut conservés) ; on le logge pour vérif.
+            print(f"Clés non trouvées dans le checkpoint (poids par défaut conservés) : {missing_keys}")
+
+        print(f"Loaded weights from {gw_checkpoint_path}")
     
     return global_workspace, domain_modules
 
@@ -387,6 +450,7 @@ def setup_data_module(data_path, config:Config, exclude_colors=True, modules=['a
         data_path,
         domain_classes,
         config.domain_proportions,
+        max_train_size=config.max_train_size,
         batch_size=config.training.batch_size,
         num_workers=config.training.num_workers,
         seed=config.seed,
@@ -459,7 +523,8 @@ def train_global_workspace(
     noise=None,
     modules=['attr', 'v_latents'],
     modules_to_freeze=[],
-    fusion_activation_fn=torch.nn.Identity()):
+    fusion_activation_fn=torch.nn.Identity(),
+    attention_tree_config=None):
     """
     Train a global workspace model with the given configuration.
     
@@ -500,7 +565,8 @@ def train_global_workspace(
         noise=noise,
         modules=modules,
         modules_to_freeze=modules_to_freeze,
-        fusion_activation_fn=fusion_activation_fn)
+        fusion_activation_fn=fusion_activation_fn,
+        attention_tree_config=attention_tree_config)
     
     # 3. Set up logger and callbacks
     logger, callbacks, checkpoint_dir = setup_logger_and_callbacks(config, experiment_name, project_name, switch_epoch)

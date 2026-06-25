@@ -196,7 +196,7 @@ def get_colors_labels_per_condition(condition: str, data = "biased_00", settings
     colors_np_2 : np.ndarray (n, 3) RGB 0-255
     labels    : np.ndarray (n,)   entiers de catégorie
     """
-    experiment_name = get_experiment_name(condition, data, 0)
+    experiment_name = condition
     modules         = get_setup_modules('syn', experiment_name)
     global_workspace = get_global_workspace(
         "syn", experiment_name, epoch=settings["epoch"], modules=modules
@@ -364,10 +364,6 @@ def get_objects_from_v_latents(
         latents_source_v_latents = latent_domains[frozenset({'v_latents'})]
         g0 = gw_mod.encode(latents_source_v_latents)['v_latents']
         x1 = gw_mod.decode(g0, domains=modules_name)
-        if modality_from == 'attr':
-            x1[modality_from] = split_binary_category_attributes(x1[modality_from])
-            x1 = {frozenset({modality_from}): x1}
-            x1 = global_workspace.encode_domains(x1)[frozenset({modality_from})]
         latents_source_1 = x1
     else:
         latents_source_1 = latent_domains[frozenset(modules_name)]
@@ -381,7 +377,8 @@ def get_objects_from_v_latents(
     vision1 = gw_mod.decode(z_vision1, domains={'v_latents'})['v_latents']
 
     # z_vision2 : moyenne des g1[x] pour x dans modules_name
-    z_vision2 = sum(g1[m] for m in modules_name) / len(modules_name)
+    z_vision2 = [g1[m] for m in modality_main] + [g1[modality_add]]
+    z_vision2 = sum(z_vision2) / len(z_vision2)
     vision2 = gw_mod.decode(z_vision2, domains={'v_latents'})['v_latents']
 
     # vision3 : décodage depuis g2[modality_through]
@@ -406,41 +403,6 @@ def get_objects_from_v_latents(
         'vision4': vision4,
     }
 
-
-def get_action_from_v_latents(
-        latent_domains,
-        gw_mod,
-        global_workspace,
-        modules_name):
-    
-    # 1. Encode v_latents → GW latent space
-    latents_source_v_latents = latent_domains[frozenset({'v_latents'})]
-    g0 = gw_mod.encode(latents_source_v_latents)['v_latents']
-    
-    # 2. Decode → attr domain
-    x1 = gw_mod.decode(g0, domains=modules_name)
-    x1['attr'] = split_binary_category_attributes(x1['attr'])
-    x1 = {frozenset({'attr'}): x1}
-    
-    # 3. Re-encode attr → GW latent space
-    x1_encoded = global_workspace.encode_domains(x1)[frozenset({'attr'})]
-    g1 = gw_mod.encode(x1_encoded)['attr']
-    
-    # 4. Decode → action
-    action = gw_mod.decode(g1, domains={'action'})['action']
-    
-    # 5. Extract original category from latent_domains
-    original_latents = latent_domains[frozenset(modules_name)]
-    original_attr = original_latents['attr']
-    if isinstance(original_attr, (list, tuple)):
-        original_category = torch.argmax(original_attr[0], dim=1)
-    else:
-        original_category = torch.argmax(original_attr, dim=1)
-    
-    return {
-        'original_category': original_category,
-        'action': action,
-    }
 
 def compute_dataset_stats(dataset):
     attr = dataset['attr'][0]    # (n, 3) one-hot
@@ -567,3 +529,127 @@ def evaluate_robust_transfer(objects, category, n_per_cat=3, n_iterations=50):
         }
         
     return stats
+
+
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional
+
+import torch
+
+
+@dataclass
+class Level2Spec:
+    """Un domaine de niveau 2, recalculé en repassant par decode/encode."""
+    from_domain: str
+    target_domain: str
+    score_name: Optional[str] = None
+
+    def get_score_name(self) -> str:
+        return self.score_name or f"{self.target_domain}2"
+
+
+@dataclass
+class AttentionTreeConfig:
+    """Décrit toute l'arborescence à 2 niveaux."""
+    root_input_domain: str = "v_latents"
+    level1_domains: List[str] = field(default_factory=lambda: ["attr", "color"])
+    level2_domains: List[Level2Spec] = field(default_factory=list)
+
+    def all_score_names(self) -> List[str]:
+        names = list(self.level1_domains)
+        names += [spec.get_score_name() for spec in self.level2_domains]
+        return names
+
+
+def get_action_from_v_latents(
+    latent_domains,
+    gw_mod,
+    global_workspace,
+    modules_name,
+    tree_config: Optional[AttentionTreeConfig] = None,
+    fixed_weights: Optional[Dict[str, float]] = None,
+):
+    """
+    Reproduit les mêmes chemins que MyAttentionGWLosses._compute_leaves /
+    step, mais en partant de v_latents comme entrée unique (pas de raw_data,
+    pas de module d'attention appris -- les poids sont fixes, passés ou
+    par défaut).
+
+    Args:
+        latent_domains: dict de LatentsDomainGroupsT (comme dans la fonction
+            d'origine).
+        gw_mod: le module GW (encode/decode).
+        global_workspace: utilisé pour encode_domains après split_binary_category_attributes.
+        modules_name: domaines à décoder lors du passage GW -> domaines bruts.
+        tree_config: config de l'arbre (par défaut si non fournie).
+        fixed_weights: dict {score_name: poids}. Si une clé est absente,
+            poids 0.0 par défaut. Pas de softmax/normalisation -- les poids
+            sont utilisés tels quels (pondération libre, pour debug).
+
+    Returns:
+        dict avec 'original_category', 'action', 'z', 'leaves', 'scores'.
+    """
+    cfg = tree_config or AttentionTreeConfig(
+        root_input_domain="v_latents",
+        level1_domains=["attr"],
+        level2_domains=[
+            Level2Spec(from_domain="attr", target_domain="color", score_name="color2"),
+        ],
+    )
+
+    score_names = cfg.all_score_names()
+    weights = fixed_weights or {}
+    # poids par défaut 0.0 pour toute feuille non spécifiée
+    scores = {name: float(weights.get(name, 0.0)) for name in score_names}
+
+    # --- 1. encode root_input_domain -> g ---
+    latents_source = latent_domains[frozenset({cfg.root_input_domain})]
+    g = gw_mod.encode(latents_source)[cfg.root_input_domain]
+
+    # --- 2. decode(g) -> x (domaines bruts demandés) ---
+    x = gw_mod.decode(g, domains=modules_name)
+    g1 = gw_mod.encode(x)
+
+    leaves: Dict[str, torch.Tensor] = {}
+    g_level1: Dict[str, torch.Tensor] = {}
+    g_level0: Dict[str, torch.Tensor] = {}
+
+    for dom in cfg.level0_domains:
+        g_dom = gw_mod.encode(latents_source)[dom]
+        g_level0[dom] = g_dom
+        leaves[dom] = g_dom
+
+    for dom in cfg.level1_domains:
+        g_dom = g1[dom]
+        g_level1[dom] = g_dom
+        leaves[dom] = g_dom
+
+    for spec in cfg.level2_domains:
+        x_from = gw_mod.decode(g1[spec.from_domain], domains={spec.target_domain})
+        g_target = gw_mod.encode(x_from)[spec.target_domain]
+        leaves[spec.get_score_name()] = g_target
+
+    # --- 5. combinaison pondérée (poids fixes, pas de softmax) ---
+    z = sum(scores[name] * leaves[name] for name in leaves)
+
+    # g_task = gw_mod.encode(latent_domains[frozenset({'task'})])["task"]
+    # z = z + 0.5 * g_task
+
+    # --- 6. decode z -> action ---
+    action = gw_mod.decode(z, domains={"action"})["action"]
+
+    # --- 7. catégorie d'origine, pour comparaison ---
+    original_latents = latent_domains[frozenset(modules_name)]
+    original_attr = original_latents["attr"]
+    if isinstance(original_attr, (list, tuple)):
+        original_category = torch.argmax(original_attr[0], dim=1)
+    else:
+        original_category = torch.argmax(original_attr, dim=1)
+
+    return {
+        "original_category": original_category,
+        "action": action,
+        "z": z,
+        "leaves": leaves,
+        "scores": scores,
+    }

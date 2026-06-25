@@ -8,14 +8,14 @@ torch.autograd.set_detect_anomaly(True)
 if __name__ == "__main__":
 
     project_name = "syn"
-    condition = "task_att_debug2"
+    condition = "base_model_s126"
     data = "biased_00"
     switch_epoch = 0
 
-    modules = ['attr', 'color', 'v_latents', 'action']
-    modules_to_freeze = ['attr', 'color', 'v_latents']
-    load_from_checkpoint = True
-    gw_checkpoint_path = "/home/lucas/gwsyn/checkpoints/syn/base_task_biased_00/checkpoints/last.ckpt"
+    modules = ['attr', 'color', 'v_latents']
+    modules_to_freeze = []
+    load_from_checkpoint = False
+    gw_checkpoint_path = None
     fusion_activation_fn = torch.tanh
 
     clean_names = [m.replace("_", "") for m in sorted(modules)]
@@ -23,11 +23,11 @@ if __name__ == "__main__":
 
     config = load_config(f"{ROOT_PATH}/config", use_cli=False, load_files=[config_filename])
                 
-    experiment_name = get_experiment_name(condition, data, switch_epoch)
     exclude_colors = False if condition == "control" else True
 
     config.dataset.path = f"{ROOT_PATH}/simple_shapes_dataset_{data}"
     config.training.batch_size = 2056
+    config.max_train_size = 500000
     config.seed = 126
 
     apply_custom_init = True
@@ -41,24 +41,27 @@ if __name__ == "__main__":
 
     noise = {"mean": 1.0, "std": 0.0}
 
+    attention_tree_config = None
+
     log_training_params = {
-        "experiment_name": experiment_name,
+        "experiment_name": condition,
         "exclude_colors": exclude_colors,
         "apply_custom_init": apply_custom_init,
         "config": config,
         "custom_hparams": custom_hparams,
         "swith_epoch": switch_epoch,
         "custom_weights": custom_weights,
-        "modules": modules
+        "modules": modules,
+        "attention_tree_config": attention_tree_config
     }
 
-    save_training_params_pickle(log_training_params, project_name, experiment_name)
+    save_training_params_pickle(log_training_params, project_name, condition)
 
     model, checkpoint_path = train_global_workspace(
         config,
         custom_hparams=custom_hparams, 
         project_name=project_name,
-        experiment_name=experiment_name,
+        experiment_name=condition,
         apply_custom_init=apply_custom_init,
         exclude_colors=exclude_colors,
         load_from_checkpoint=load_from_checkpoint,
@@ -68,5 +71,6 @@ if __name__ == "__main__":
         noise=noise,
         modules=modules,
         modules_to_freeze=modules_to_freeze,
-        fusion_activation_fn=fusion_activation_fn
+        fusion_activation_fn=fusion_activation_fn,
+        attention_tree_config=attention_tree_config
     )

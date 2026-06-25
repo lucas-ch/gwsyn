@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
+import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -51,18 +52,27 @@ class FixAttentionLR(Callback):
 
 
 class SimpleWeightSelection(SelectionBase):
-    """
-    Sélection apprenante très simple : un scalaire de poids par modalité
-    (attr, color), normalisé par softmax pour sommer à 1.
-    Pas de dépendance aux données d'entrée -- juste deux paramètres globaux.
-    """
-
-    def __init__(self, domain_names=("attr", "color"), grad_multiplier=10000.0):
+    def __init__(
+        self,
+        domain_names=("attr", "color"),
+        grad_multiplier=10000.0,
+        init_weights: dict[str, float] | None = None,  # ex: {"attr": 2.0, "color": 0.5, "v_latents": 1.0}
+    ):
         super().__init__()
         self.domain_names = list(domain_names)
-        self.raw_weights = nn.Parameter(torch.zeros(len(self.domain_names)))
         
-        # amplifie le gradient reçu par ce paramètre uniquement
+        if init_weights is not None:
+            # Initialisation personnalisée par domaine
+            proportions = torch.tensor(
+                [init_weights.get(name, 0.0) for name in self.domain_names],
+                dtype=torch.float32
+            )
+            init_tensor = torch.log(proportions)
+        else:
+            # Comportement par défaut : tous à 0 → softmax uniforme
+            init_tensor = torch.zeros(len(self.domain_names))
+        
+        self.raw_weights = nn.Parameter(init_tensor)
         self.raw_weights.register_hook(lambda grad: grad * grad_multiplier)
 
     def forward(
@@ -70,14 +80,29 @@ class SimpleWeightSelection(SelectionBase):
     ) -> dict[str, torch.Tensor]:
         bs = next(iter(domains.values())).size(0)
         device = next(iter(domains.values())).device
-
-        weights = torch.softmax(self.raw_weights, dim=0)  # somme à 1, ex: [0.5, 0.5] au départ
-
+        weights = torch.softmax(self.raw_weights, dim=0)
         selection = {}
         for i, name in enumerate(self.domain_names):
             selection[name] = weights[i].expand(bs).to(device)
         return selection
 
+
+class IndependentWeight(nn.Module):
+    """
+    Poids scalaire appris, indépendant de tout softmax partagé.
+    Passé par un sigmoid pour rester borné entre 0 et 1, mais pas contraint
+    à sommer à 1 avec d'autres scores (contrairement à SimpleWeightSelection).
+    """
+
+    def __init__(self, init_value: float = 0.0, grad_multiplier: float = 10000.0):
+        super().__init__()
+        # init_value est le logit de départ (0.0 -> sigmoid(0) = 0.5 au départ)
+        self.raw_weight = nn.Parameter(torch.tensor(float(init_value)))
+        self.raw_weight.register_hook(lambda grad: grad * grad_multiplier)
+
+    def forward(self, batch_size: int, device: torch.device) -> torch.Tensor:
+        weight = torch.sigmoid(self.raw_weight)  # scalaire dans (0, 1)
+        return weight.expand(batch_size).to(device)
 
 
 @dataclass
@@ -102,16 +127,19 @@ class AttentionTreeConfig:
     # domaine d'entrée utilisé pour construire g = encode(domain_latents)[root_input_domain]
     root_input_domain: str = "v_latents"
 
+    level0_domains: List[str] = field(default_factory=list)
+
     # domaines de niveau 1 à extraire de x = decode(g)
     # (le nom du domaine sert aussi de score_name, ex: ["attr", "color"])
-    level1_domains: List[str] = field(default_factory=lambda: ["attr", "color"])
+    level1_domains: List[str] = field(default_factory=list)
 
     # domaines de niveau 2 : chacun part d'un domaine de niveau 1, le décode,
     # ré-encode, et récupère un domaine cible
     level2_domains: List[Level2Spec] = field(default_factory=list)
 
     def all_score_names(self) -> List[str]:
-        names = list(self.level1_domains)
+        names = list(self.level0_domains)
+        names += list(self.level1_domains)
         names += [spec.get_score_name() for spec in self.level2_domains]
         return names
 
@@ -128,24 +156,13 @@ class MyAttentionGWLosses(GWLosses2Domains):
     ):
         super().__init__(gw_mod, selection_mod, domain_mods, loss_coefs, contrastive_fn)
 
-        self.tree_config = tree_config or AttentionTreeConfig(
-            root_input_domain="v_latents",
-            level1_domains=["attr", "color", "v_latents"],
-            level2_domains=[
-                Level2Spec(from_domain="attr", target_domain="color", score_name="color2"),
-                Level2Spec(from_domain="color", target_domain="attr", score_name="attr2"),
-                Level2Spec(from_domain="attr", target_domain="v_latents", score_name="vl2"),
-                Level2Spec(from_domain="color", target_domain="v_latents", score_name="vl3"),
-
-            ],
-        )
-
+        self.tree_config = tree_config or AttentionTreeConfig()
+        
         score_names = self.tree_config.all_score_names()
 
-        # module de sélection apprenant -- DOIT être un sous-module
-        # pour que ses paramètres soient inclus dans l'optimizer.
-        # domain_names construit dynamiquement à partir de la config.
-        self.attention = SimpleWeightSelection(domain_names=tuple(score_names))
+        self.attention = SimpleWeightSelection(
+            domain_names=tuple(score_names),
+            init_weights=None)
 
     def _compute_leaves(
         self, domain_latents: "LatentsDomainGroupsT", key: frozenset
@@ -155,23 +172,24 @@ class MyAttentionGWLosses(GWLosses2Domains):
 
         g = self.gw_mod.encode(domain_latents[key])[cfg.root_input_domain]
         x = self.gw_mod.decode(g)
+        g1 = self.gw_mod.encode(x)
 
         leaves: Dict[str, torch.Tensor] = {}
-        # cache des g de niveau 1, nécessaires pour dériver le niveau 2
+        g_level0: Dict[str, torch.Tensor] = {}
         g_level1: Dict[str, torch.Tensor] = {}
 
+        for dom in cfg.level0_domains:
+            g_dom = self.gw_mod.encode(domain_latents[key])[dom]
+            g_level0[dom] = g_dom
+            leaves[dom] = g_dom
+
         for dom in cfg.level1_domains:
-            g_dom = self.gw_mod.encode(x)[dom]
+            g_dom = g1[dom]
             g_level1[dom] = g_dom
             leaves[dom] = g_dom
 
         for spec in cfg.level2_domains:
-            if spec.from_domain not in g_level1:
-                raise ValueError(
-                    f"Level2Spec.from_domain={spec.from_domain!r} doit être "
-                    f"présent dans level1_domains={cfg.level1_domains}"
-                )
-            x_from = self.gw_mod.decode(g_level1[spec.from_domain])
+            x_from = self.gw_mod.decode(g1[spec.from_domain])
             g_target = self.gw_mod.encode(x_from)[spec.target_domain]
             leaves[spec.get_score_name()] = g_target
 
@@ -183,22 +201,25 @@ class MyAttentionGWLosses(GWLosses2Domains):
         domain_latents: "LatentsDomainGroupsT",
         mode: "ModelModeT",
     ) -> "LossOutput":
-        key = frozenset({"attr", "color", "v_latents", "action"})
-        target = torch.argmax(raw_data[key]["attr"][0], dim=1).unsqueeze(-1).float()
+        key = next(k for k in domain_latents.keys() if len(k) > 1)
+        cats = torch.argmax(raw_data[key]["attr"][0], dim=1)
+        target = cats.long()
 
         leaves = self._compute_leaves(domain_latents, key)
 
-        # scores d'attention appris sur toutes les feuilles (remplace le 0.5/0.5 fixe)
+        if len(leaves) == 0:
+            return LossOutput(0)
+        
         scores = self.attention(leaves, leaves)
-
         z = sum(scores[name].unsqueeze(-1) * leaves[name] for name in leaves)
 
         pred = self.gw_mod.decode(z)["action"]
-        custom_loss = F.mse_loss(pred, target, reduction="mean")
+        custom_loss = F.cross_entropy(pred, target, reduction="mean")
 
         return LossOutput(
             custom_loss,
-            {f"weight_{name}": scores[name].mean() for name in leaves},
+            {
+                "cross_entropy": custom_loss.detach(),
+                **{f"weight_{name}": scores[name].mean() for name in leaves},
+            },
         )
-    
-

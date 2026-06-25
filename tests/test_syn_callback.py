@@ -10,8 +10,7 @@ def test_callback():
     data = "test1"
     switch_epoch = 0
 
-    experiment_name = get_experiment_name(condition, data, switch_epoch)
-    experiment_name = f"{condition}_{data}"
+    experiment_name = condition
 
     if switch_epoch > 0:
         experiment_name = f"{experiment_name}_switch_{switch_epoch}"
