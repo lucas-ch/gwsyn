@@ -54,7 +54,7 @@ class MyCustomGWLosses(GWLosses2Domains):
 
         custom_weights = self.custom_weights
      
-        if len(custom_weights.items()) == 0:
+        if custom_weights is None or len(custom_weights.items()) == 0:
             return LossOutput(combine_loss(metrics, self.loss_coefs), metrics)
 
         weighted_losses = []
@@ -183,9 +183,6 @@ class MyGlobalWorkspace(GlobalWorkspace2Domains):
                 if id(p) not in attention_param_ids
             ]
 
-            # un seul optimizer, deux groupes -- lr initial différent
-            # (le lr du groupe attention sera de toute façon écrasé à chaque step
-            # par le callback FixAttentionLR, donc sa valeur ici importe peu)
             optimizer = AdamW(
                 [
                     {"params": other_params, "lr": self.optim_lr, "weight_decay": self.optim_weight_decay},
@@ -220,14 +217,12 @@ class MyGlobalWorkspace(GlobalWorkspace2Domains):
                     encoder = self.gw_mod.gw_encoders[name]
                     decoder = self.gw_mod.gw_decoders[name]
                     
-                    # 1. Bloquer le calcul des gradients (Freeze des poids)
                     for param in encoder.parameters():
                         param.requires_grad = False
                     
                     for param in decoder.parameters():
                         param.requires_grad = False
 
-                    # 2. Passer en mode évaluation (Désactive Dropout/BatchNorm)
                     encoder.eval()
                     decoder.eval()
                     

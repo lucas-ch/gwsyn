@@ -7,11 +7,15 @@ import wandb
 import torch
 from torch import nn
 from torch.utils.data import default_collate
-from lightning import LightningDataModule, Trainer
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, OneCycleLR
+from torch.optim.optimizer import Optimizer
+
+from lightning import Trainer
 from lightning.pytorch.callbacks import LearningRateMonitor, Callback, ModelCheckpoint
 from lightning.pytorch.loggers.wandb import WandbLogger
 
-from shimmer_ssd.config import Config
+from shimmer_ssd.config import Config, LoadedDomainConfig, DomainModuleVariant
+from shimmer_ssd.modules.domains import load_pretrained_domains
 
 from .utils_attention import *
 from .utils_custom_gw import *
@@ -27,31 +31,42 @@ def get_project_root():
 ROOT_PATH = get_project_root()
 REGULAR_DATASET_PATH = f"{ROOT_PATH}/simple_shapes_dataset_biased_00"
 
-class SequentialDataModule(LightningDataModule):
-    def __init__(self, data_module_1:LightningDataModule, data_module_2:LightningDataModule, switch_epoch:int):
-        super().__init__()
-        self.data_module_1 = data_module_1
-        self.data_module_2 = data_module_2
-        self.switch_epoch = switch_epoch
+DOMAIN_DEFAULT_CHECKPOINT = "domain_attr.ckpt"
+DOMAIN_V_CHECKPOINT = "domain_v.ckpt"
 
-    def setup(self, stage=None):
-        self.data_module_1.setup(stage)
-        self.data_module_2.setup(stage)
-
-    def train_dataloader(self):
-        epoch = self.trainer.current_epoch
-        if self.trainer.current_epoch < self.switch_epoch:
-            print(f"--- [DEBUG] Chargement TrainLoader PHASE 1 (Epoch {epoch}) ---")
-            return self.data_module_1.train_dataloader()
-        else:
-            print(f"--- [DEBUG] Chargement TrainLoader PHASE 2 (Epoch {epoch}) ---")
-            return self.data_module_2.train_dataloader()
-
-    def val_dataloader(self):
-        if self.trainer.current_epoch < self.switch_epoch:
-            return self.data_module_1.val_dataloader()
-        else:
-            return self.data_module_2.val_dataloader()
+DOMAIN_CONFIGS = {
+    "attr":          lambda cp, hp, excl: LoadedDomainConfig(
+                         domain_type=DomainModuleVariant.attr_legacy_no_color if excl else DomainModuleVariant.attr_legacy,
+                         checkpoint_path=cp / DOMAIN_DEFAULT_CHECKPOINT,
+                         args=hp),
+    "v_latents":     lambda cp, hp, excl: LoadedDomainConfig(
+                         domain_type=DomainModuleVariant.v_latents,
+                         checkpoint_path=cp / DOMAIN_V_CHECKPOINT),
+    "color":         lambda cp, hp, excl: LoadedDomainConfig(
+                         domain_type=DomainModuleVariant.color,
+                         checkpoint_path=cp / DOMAIN_DEFAULT_CHECKPOINT,
+                         args=hp),
+    "cat":           lambda cp, hp, excl: LoadedDomainConfig(
+                         domain_type=DomainModuleVariant.cat,
+                         checkpoint_path=cp / DOMAIN_DEFAULT_CHECKPOINT,
+                         args=hp),
+    "position":      lambda cp, hp, excl: LoadedDomainConfig(
+                         domain_type=DomainModuleVariant.position,
+                         checkpoint_path=cp / DOMAIN_DEFAULT_CHECKPOINT,
+                         args=hp),
+    "positioncolor": lambda cp, hp, excl: LoadedDomainConfig(
+                         domain_type=DomainModuleVariant.positioncolor,
+                         checkpoint_path=cp / DOMAIN_DEFAULT_CHECKPOINT,
+                         args=hp),
+    "action":        lambda cp, hp, excl: LoadedDomainConfig(
+                         domain_type=DomainModuleVariant.action,
+                         checkpoint_path=cp / DOMAIN_DEFAULT_CHECKPOINT,
+                         args=hp),
+    "task":          lambda cp, hp, excl: LoadedDomainConfig(
+                         domain_type=DomainModuleVariant.task,
+                         checkpoint_path=cp / DOMAIN_DEFAULT_CHECKPOINT,
+                         args=hp),
+}
 
 class CustomFlexibleCheckpoint(Callback):
     def __init__(self, project_name, experiment_name, dirpath, switch_epoch=None):
@@ -71,10 +86,6 @@ class CustomFlexibleCheckpoint(Callback):
             should_save = True
 
         else:
-            if self.switch_epoch > 0 and self.switch_epoch <= epoch < (self.switch_epoch + 100):
-                if (epoch - self.switch_epoch) % 10 == 0:
-                    should_save = True
-            else:
                 if epoch in [1, 10, 20, 40, 60, 80, 100]:
                     should_save = True
                 elif epoch > 100 and epoch % 50 == 0:
@@ -87,13 +98,10 @@ class CustomFlexibleCheckpoint(Callback):
 
     def on_train_epoch_end(self, trainer, pl_module):
         self.save_checkpoint(trainer)
-#        self.run_color_analysis(trainer, pl_module)
-
 
 def get_training_params(project_name, experiment_name):
-    training_params = load_training_params_pickle(project_name,  experiment_name)
+    training_params = load_training_params_pickle(project_name, experiment_name)
     return training_params
-
 
 def get_global_workspace(project_name, experiment_name, checkpoint_path=None, epoch=0, modules=['attr', 'v_latents']):
     root_path = get_project_root()
@@ -200,130 +208,145 @@ def custom_collate_factory(exclude_colors: bool):
         return result
     return custom_collate
 
+def load_global_workspace_from_checkpoint(global_workspace, gw_checkpoint_path):
+        print(f"Loading model from checkpoint: {gw_checkpoint_path}")
+        
+        checkpoint = torch.load(gw_checkpoint_path, "cpu")
+        full_state_dict = checkpoint['state_dict']
+        
+        all_modules = set(global_workspace.gw_mod.gw_encoders.keys())
+        gw_prefixes = ("gw_mod.gw_encoders.", "gw_mod.gw_decoders.")
+        
+        present_modules = {
+            key[len(prefix):].split(".", 1)[0]
+            for key in full_state_dict
+            for prefix in gw_prefixes
+            if key.startswith(prefix)
+        }
+        missing_modules = all_modules - present_modules
+
+        filtered_state_dict = {
+            key: value
+            for key, value in full_state_dict.items()
+            if not key.startswith(gw_prefixes)
+            or any(
+                key.startswith(f"{prefix}{module}.")
+                for prefix in gw_prefixes
+                for module in present_modules
+            )
+        }
+
+        missing_keys, unexpected_keys = global_workspace.load_state_dict(filtered_state_dict, strict=False)
+        
+        global_workspace.domain_mods["v_latents"].freeze()
+        global_workspace.domain_mods["v_latents"].eval()
+        for i in global_workspace.gw_mod.gw_encoders:
+            global_workspace.gw_mod.gw_encoders[i].eval()
+            global_workspace.gw_mod.gw_decoders[i].eval()
+
+        print(f"Modules chargés depuis le checkpoint   : {sorted(present_modules & all_modules)}")
+        print(f"Modules en poids par défaut (init)      : {sorted(missing_modules)}")
+        if unexpected_keys:
+            print(f"⚠️  Clés inattendues ignorées : {unexpected_keys}")
+        if missing_keys:
+            print(f"Clés non trouvées (poids par défaut conservés) : {missing_keys}")
+        print(f"Loaded weights from {gw_checkpoint_path}")
+
+        return global_workspace
+
+def setup_domains(
+    modules: list[str],
+    checkpoint_path: Path,
+    hparams: dict,
+    exclude_colors: bool,
+) -> list[LoadedDomainConfig]:
+    return [
+        DOMAIN_CONFIGS[name](checkpoint_path, hparams, exclude_colors)
+        for name in modules
+        if name in DOMAIN_CONFIGS
+    ]
+
+def get_scheduler(optimizer: Optimizer, config, scheduler_type: str = "onecycle"):
+    if scheduler_type == "onecycle":
+        return OneCycleLR(
+            optimizer,
+            config.training.optim.max_lr,
+            int(config.training.max_steps),
+            pct_start=config.training.optim.pct_start,
+            div_factor=0.38,
+            final_div_factor=5,
+        )
+    elif scheduler_type == "linear":
+        return LinearLR(
+            optimizer,
+            start_factor=1.0,
+            end_factor=0.1,
+            total_iters=config.training.max_steps,
+        )
+    elif scheduler_type == "cosine":
+        return CosineAnnealingLR(
+            optimizer,
+            T_max=config.training.max_steps,
+            eta_min=config.training.optim.lr / 100,
+        )
+    else:
+        raise ValueError(f"Scheduler type '{scheduler_type}' not supported")
+
+def build_global_workspace(
+    config,
+    domain_modules,
+    gw_encoders,
+    gw_decoders,
+    custom_weights,
+    noise,
+    modules_to_freeze,
+    fusion_activation_fn,
+    attention_tree_config,
+    apply_custom_init: bool,
+) -> MyGlobalWorkspace:
+    if apply_custom_init:
+        for encoder in gw_encoders.values():
+            encoder.apply(lambda m: init_weights(m, config.seed))
+        for decoder in gw_decoders.values():
+            decoder.apply(lambda m: init_weights(m, config.seed))
+
+    gw = MyGlobalWorkspace(
+        domain_mods=domain_modules,
+        gw_encoders=gw_encoders,
+        gw_decoders=gw_decoders,
+        workspace_dim=config.global_workspace.latent_dim,
+        loss_coefs=config.global_workspace.loss_coefficients,
+        custom_weights=custom_weights,
+        noise=noise,
+        modules_to_freeze=modules_to_freeze,
+        optim_lr=config.training.optim.lr,
+        optim_weight_decay=config.training.optim.weight_decay,
+        scheduler=lambda opt, stype="onecycle": get_scheduler(opt, config, stype),
+        fusion_activation_function=fusion_activation_fn,
+        attention_tree_config=attention_tree_config,
+    )
+
+    gw.domain_mods["v_latents"].freeze()
+    gw.domain_mods["v_latents"].eval()
+    return gw
+
 def setup_global_workspace(
-        config, hparams,
-        exclude_colors=True,
-        apply_custom_init=True,
-        load_from_checkpoint=True,
-        gw_checkpoint_path=None,
-        custom_weights=None,
-        noise=None,
-        modules=['attr', 'v_latents'],
-        modules_to_freeze=[],
-        fusion_activation_fn=torch.nn.Identity(),
-        attention_tree_config=None):
-    """
-    Set up the global workspace model.
-    
-    Args:
-        config: Configuration with model parameters
-        hparams: Hyperparameters dictionary
-        
-    Returns:
-        tuple: (global_workspace, domain_modules)
-    """
-    from pathlib import Path
-    from shimmer_ssd.config import LoadedDomainConfig, DomainModuleVariant
-    from shimmer_ssd.modules.domains import load_pretrained_domains
-    from shimmer.modules.global_workspace import GlobalWorkspace2Domains
-    from torch.optim.lr_scheduler import OneCycleLR
-    from torch.optim.optimizer import Optimizer
-    
-    root_path = get_project_root()
-    # Set up domain configurations
-    checkpoint_path = Path(f"{root_path}/checkpoints")
+    config,
+    hparams,
+    exclude_colors: bool = True,
+    apply_custom_init: bool = True,
+    load_from_checkpoint: bool = True,
+    gw_checkpoint_path=None,
+    custom_weights=None,
+    noise=None,
+    modules: list[str] = ("attr", "v_latents"),
+    modules_to_freeze: list = [],
+    fusion_activation_fn=torch.nn.Identity(),
+    attention_tree_config=None,
+):
+    checkpoint_path = Path(get_project_root()) / "checkpoints"
 
-    domains = []
-    if 'attr' in modules:
-        domain_config = LoadedDomainConfig(
-                domain_type=DomainModuleVariant.attr_legacy_no_color if exclude_colors else DomainModuleVariant.attr_legacy,
-                checkpoint_path=checkpoint_path / "domain_attr.ckpt",
-                args=hparams,
-            )
-        domains.append(domain_config)
-
-    if 'v_latents' in modules:
-        domain_config = LoadedDomainConfig(
-                domain_type=DomainModuleVariant.v_latents,
-                checkpoint_path= checkpoint_path / "domain_v.ckpt"
-            )
-        domains.append(domain_config)
-
-    if 'color' in modules:
-        domain_config = LoadedDomainConfig(
-                domain_type=DomainModuleVariant.color,
-                checkpoint_path=checkpoint_path / "domain_attr.ckpt",
-                args=hparams,
-            )
-        domains.append(domain_config)
-
-        
-    if 'cat' in modules:
-        domain_config = LoadedDomainConfig(
-                domain_type=DomainModuleVariant.cat,
-                checkpoint_path=checkpoint_path / "domain_attr.ckpt",
-                args=hparams,
-            )
-        domains.append(domain_config)
-
-
-    if 'position' in modules:
-        domain_config = LoadedDomainConfig(
-                domain_type=DomainModuleVariant.position,
-                checkpoint_path=checkpoint_path / "domain_attr.ckpt",
-                args=hparams,
-            )
-        domains.append(domain_config)
-
-    if 'positioncolor' in modules:
-        domain_config = LoadedDomainConfig(
-                domain_type=DomainModuleVariant.positioncolor,
-                checkpoint_path=checkpoint_path / "domain_attr.ckpt",
-                args=hparams,
-            )
-        domains.append(domain_config)
-
-    if 'action' in modules:
-        domain_config = LoadedDomainConfig(
-                domain_type=DomainModuleVariant.action,
-                checkpoint_path=checkpoint_path / "domain_attr.ckpt",
-                args=hparams,
-            )
-        domains.append(domain_config)
-
-    if 'task' in modules:
-        domain_config = LoadedDomainConfig(
-                domain_type=DomainModuleVariant.task,
-                checkpoint_path=checkpoint_path / "domain_attr.ckpt",
-                args=hparams,
-            )
-        domains.append(domain_config)
-
-    # Create scheduler function
-    def get_scheduler(optimizer: Optimizer, scheduler_type: str = "onecycle"):
-        if scheduler_type == "onecycle":
-            return OneCycleLR(optimizer, config.training.optim.max_lr, 
-                          int(config.training.max_steps), 
-                          pct_start=config.training.optim.pct_start, div_factor=.38, final_div_factor=5)
-        elif scheduler_type == "linear":
-            from torch.optim.lr_scheduler import LinearLR
-            return LinearLR(
-                optimizer,
-                start_factor=1.0,
-                end_factor=0.1,
-                total_iters=config.training.max_steps
-                )
-        elif scheduler_type == "cosine":
-            from torch.optim.lr_scheduler import CosineAnnealingLR
-            return CosineAnnealingLR(
-                optimizer,
-                T_max=config.training.max_steps,
-                eta_min=config.training.optim.lr / 100
-            )
-        else:
-            print(f"Scheduler type {scheduler_type} not supported")
-            return None
-    # Load domains and create GW
+    domains = setup_domains(modules, checkpoint_path, hparams, exclude_colors)
     domain_modules, gw_encoders, gw_decoders = load_pretrained_domains(
         domains,
         config.global_workspace.latent_dim,
@@ -332,104 +355,16 @@ def setup_global_workspace(
         config.global_workspace.decoders.hidden_dim,
         config.global_workspace.decoders.n_layers,
     )
-    
-    # Adjust learning rate based on loss coefficients
-    # lr = config.training.optim.lr * 3.1 / sum(config.global_workspace.loss_coefficients.values()) #### TODO: check if this is correct
-    lr = config.training.optim.lr
-    # Create global workspace
-    
 
-    if apply_custom_init:
-        # Only apply initialization to GW encoders and decoders, not to the pretrained visual module
-        for modality in gw_encoders:
-            encoder = gw_encoders[modality]
-            encoder.apply(lambda m: init_weights(m, config.seed))
-        for modality in gw_decoders:
-            decoder = gw_decoders[modality]
-            decoder.apply(lambda m: init_weights(m, config.seed))
-
-    global_workspace = MyGlobalWorkspace(
-        domain_mods= domain_modules,
-        gw_encoders = gw_encoders,
-        gw_decoders = gw_decoders,
-        workspace_dim = config.global_workspace.latent_dim,
-        loss_coefs = config.global_workspace.loss_coefficients,
-        custom_weights=custom_weights,
-        noise=noise,
-        modules_to_freeze=modules_to_freeze,
-        optim_lr=lr,
-        optim_weight_decay = config.training.optim.weight_decay,
-        scheduler=get_scheduler,
-        fusion_activation_function=fusion_activation_fn,
-        attention_tree_config= attention_tree_config
+    global_workspace = build_global_workspace(
+        config, domain_modules, gw_encoders, gw_decoders,
+        custom_weights, noise, modules_to_freeze,
+        fusion_activation_fn, attention_tree_config, apply_custom_init,
     )
 
-    global_workspace.domain_mods["v_latents"].freeze()
-    global_workspace.domain_mods["v_latents"].eval()
-    
-    # Load from checkpoint if provided
     if load_from_checkpoint and gw_checkpoint_path is not None:
-        print(f"Loading model from checkpoint: {gw_checkpoint_path}")
-        checkpoint = torch.load(gw_checkpoint_path, map_location="cpu")
-        full_state_dict = checkpoint['state_dict']
+        load_global_workspace_from_checkpoint(global_workspace, gw_checkpoint_path)
 
-        # On suppose que le checkpoint ne contient qu'un sous-ensemble exact des
-        # modules demandés (par ex. checkpoint = ["attr", "v_latents"] alors que
-        # modules = ["attr", "v_latents", "task", "action"]). On filtre donc le
-        # state_dict pour ne charger que les clés des encoders/decoders dont le
-        # nom de module apparaît dans le checkpoint, et on laisse les autres
-        # modules sur leurs poids initialisés par défaut (apply_custom_init).
-        present_modules = set()
-        for key in full_state_dict.keys():
-            # clés typiques: "gw_mod.gw_encoders.<module>...." / "gw_mod.gw_decoders.<module>...."
-            for prefix in ("gw_mod.gw_encoders.", "gw_mod.gw_decoders."):
-                if key.startswith(prefix):
-                    module_name = key[len(prefix):].split(".", 1)[0]
-                    present_modules.add(module_name)
-
-        all_modules = set(global_workspace.gw_mod.gw_encoders.keys())
-        missing_modules = all_modules - present_modules
-
-        SHAPE_SENSITIVE_KEYS = {
-            }
-
-        filtered_state_dict = {
-            key: value
-            for key, value in full_state_dict.items()
-            if key not in SHAPE_SENSITIVE_KEYS  # ← skip si shape dépend du nb de modules
-            and (
-                any(
-                    key.startswith(f"{prefix}{module_name}.")
-                    for prefix in ("gw_mod.gw_encoders.", "gw_mod.gw_decoders.")
-                    for module_name in present_modules
-                )
-                or not key.startswith(("gw_mod.gw_encoders.", "gw_mod.gw_decoders."))
-            )
-        }
-        missing_keys, unexpected_keys = global_workspace.load_state_dict(
-            filtered_state_dict, strict=False
-        )
-
-        global_workspace.domain_mods["v_latents"].freeze()
-        global_workspace.domain_mods["v_latents"].eval()
-
-        for i in global_workspace.gw_mod.gw_encoders.keys():
-            global_workspace.gw_mod.gw_encoders[i].eval()
-            global_workspace.gw_mod.gw_decoders[i].eval()
-
-        # Log détaillé : quels modules viennent du checkpoint, lesquels restent
-        # en poids par défaut.
-        print(f"Modules chargés depuis le checkpoint   : {sorted(present_modules & all_modules)}")
-        print(f"Modules en poids par défaut (init)      : {sorted(missing_modules)}")
-        if unexpected_keys:
-            print(f"⚠️  Clés inattendues ignorées dans le checkpoint : {unexpected_keys}")
-        if missing_keys:
-            # missing_keys ici devrait correspondre exactement aux modules absents
-            # du checkpoint (poids par défaut conservés) ; on le logge pour vérif.
-            print(f"Clés non trouvées dans le checkpoint (poids par défaut conservés) : {missing_keys}")
-
-        print(f"Loaded weights from {gw_checkpoint_path}")
-    
     return global_workspace, domain_modules
 
 def setup_data_module(data_path, config:Config, exclude_colors=True, modules=['attr', 'v_latents']):
@@ -523,7 +458,7 @@ def train_global_workspace(
     noise=None,
     modules=['attr', 'v_latents'],
     modules_to_freeze=[],
-    fusion_activation_fn=torch.nn.Identity(),
+    fusion_activation_fn=torch.tanh,
     attention_tree_config=None):
     """
     Train a global workspace model with the given configuration.
@@ -538,22 +473,12 @@ def train_global_workspace(
     """
     from lightning.pytorch import Trainer
     
-    # Initialize default hyperparameters
     hparams = {"temperature": 1, "alpha": 1}
     if custom_hparams:
         hparams.update(custom_hparams)
     
-    data_module = None
-    if switch_epoch == 0:
-        data_module_1 = setup_data_module(config.dataset.path, config, exclude_colors=exclude_colors, modules=modules)
-        data_module_2 = setup_data_module(config.dataset.path, config, exclude_colors=exclude_colors, modules=modules)
-        data_module = SequentialDataModule(data_module_1, data_module_2, switch_epoch=switch_epoch)
-    if switch_epoch>0:
-        data_module_1 = setup_data_module(config.dataset.path, config, exclude_colors=exclude_colors,modules=modules)
-        data_module_2 = setup_data_module(REGULAR_DATASET_PATH, config, exclude_colors=exclude_colors, modules=modules)
-        data_module = SequentialDataModule(data_module_1, data_module_2, switch_epoch=switch_epoch)
+    data_module = setup_data_module(config.dataset.path, config, exclude_colors=exclude_colors,modules=modules)
 
-    # 2. Set up global workspace
     global_workspace, _ = setup_global_workspace(
         config,
         hparams,
@@ -568,34 +493,27 @@ def train_global_workspace(
         fusion_activation_fn=fusion_activation_fn,
         attention_tree_config=attention_tree_config)
     
-    # 3. Set up logger and callbacks
     logger, callbacks, checkpoint_dir = setup_logger_and_callbacks(config, experiment_name, project_name, switch_epoch)
     callbacks.append(FixAttentionLR(attention_lr=global_workspace.attention_lr, attention_group_idx=1))
     
-    # Log hyperparameters
     hparams_to_log = {
-        # Domain HParams
-        **hparams, # Logs temperature and alpha
-        # Model Architecture
+        **hparams,
         "encoder_size": str(config.global_workspace.encoders.hidden_dim),
         "decoder_size": str(config.global_workspace.decoders.hidden_dim),
         "encoder_layers": config.global_workspace.encoders.n_layers,
         "decoder_layers": config.global_workspace.decoders.n_layers,
         "latent_dim": config.global_workspace.latent_dim,
-        # Optimizer / Training
         "lr_base": config.training.optim.lr, # Log the base LR from config
         "max_lr": config.training.optim.max_lr,
         "weight_decay": config.training.optim.weight_decay,
         "max_steps": config.training.max_steps,
         "batch_size": config.training.batch_size,
-        # Other settings
         "seed": config.seed, # Log seed if set in config
         "exclude_colors": exclude_colors, # Logging the setting used for this run
         "switch_epoch": switch_epoch
     }
     logger.log_hyperparams(hparams_to_log)
 
-    # 4. Create trainer
     trainer = Trainer(
         logger=logger,
         max_epochs=30,
@@ -609,11 +527,9 @@ def train_global_workspace(
         reload_dataloaders_every_n_epochs=1
     )
     
-    # 5. Train and validate
     trainer.fit(global_workspace, data_module)
     trainer.validate(global_workspace, data_module, "best")
 
     wandb.finish()
 
-    
     return global_workspace, checkpoint_dir

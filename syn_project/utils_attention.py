@@ -86,55 +86,21 @@ class SimpleWeightSelection(SelectionBase):
             selection[name] = weights[i].expand(bs).to(device)
         return selection
 
-
-class IndependentWeight(nn.Module):
-    """
-    Poids scalaire appris, indépendant de tout softmax partagé.
-    Passé par un sigmoid pour rester borné entre 0 et 1, mais pas contraint
-    à sommer à 1 avec d'autres scores (contrairement à SimpleWeightSelection).
-    """
-
-    def __init__(self, init_value: float = 0.0, grad_multiplier: float = 10000.0):
-        super().__init__()
-        # init_value est le logit de départ (0.0 -> sigmoid(0) = 0.5 au départ)
-        self.raw_weight = nn.Parameter(torch.tensor(float(init_value)))
-        self.raw_weight.register_hook(lambda grad: grad * grad_multiplier)
-
-    def forward(self, batch_size: int, device: torch.device) -> torch.Tensor:
-        weight = torch.sigmoid(self.raw_weight)  # scalaire dans (0, 1)
-        return weight.expand(batch_size).to(device)
-
-
 @dataclass
 class Level2Spec:
-    """Un domaine de niveau 2, recalculé en repassant par decode/encode."""
-
-    # domaine source de niveau 1 dont on repart (ex: "attr")
     from_domain: str
-    # domaine qu'on récupère après avoir ré-encodé x_from_domain (ex: "color")
     target_domain: str
-    # nom du score / clé dans z (par défaut: target_domain + "2")
     score_name: Optional[str] = None
 
     def get_score_name(self) -> str:
         return self.score_name or f"{self.target_domain}2"
 
-
 @dataclass
 class AttentionTreeConfig:
-    """Décrit toute l'arborescence à 2 niveaux."""
-
-    # domaine d'entrée utilisé pour construire g = encode(domain_latents)[root_input_domain]
     root_input_domain: str = "v_latents"
 
     level0_domains: List[str] = field(default_factory=list)
-
-    # domaines de niveau 1 à extraire de x = decode(g)
-    # (le nom du domaine sert aussi de score_name, ex: ["attr", "color"])
     level1_domains: List[str] = field(default_factory=list)
-
-    # domaines de niveau 2 : chacun part d'un domaine de niveau 1, le décode,
-    # ré-encode, et récupère un domaine cible
     level2_domains: List[Level2Spec] = field(default_factory=list)
 
     def all_score_names(self) -> List[str]:
@@ -142,7 +108,6 @@ class AttentionTreeConfig:
         names += list(self.level1_domains)
         names += [spec.get_score_name() for spec in self.level2_domains]
         return names
-
 
 class MyAttentionGWLosses(GWLosses2Domains):
     def __init__(
