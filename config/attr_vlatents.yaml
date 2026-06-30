@@ -2,26 +2,22 @@ global_workspace:
     latent_dim: 12
 
     loss_coefficients:
-        cycles: 1
-        contrastives: 1
+        cycles: 10
+        contrastives: 0.1
         demi_cycles: 1
-        translations: 0
+        translations: 1
     encoders:
         hidden_dim:
-            attr: 8
-            attr_legacy_no_color: 8
+            attr: 32
+            attr_legacy_no_color: 32
             v_latents: 256
-            cat: 8
-            color: 8
         n_layers: 2
 
     decoders:
         hidden_dim:
-            attr: 8
-            attr_legacy_no_color: 8
-            v_latents: 64
-            cat: 8
-            color: 8
+            attr: 32
+            attr_legacy_no_color: 32
+            v_latents: 256
         n_layers: 2
 
 training:
@@ -33,7 +29,7 @@ training:
         end_lr: 1e-5
         pct_start: 0.03
 
-    max_steps: 300000
+    max_steps: 8000
     devices: 1
 
 

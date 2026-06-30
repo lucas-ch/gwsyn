@@ -44,6 +44,7 @@ dependencies = [
     "simple-shapes-dataset @ file:///home/lucas/simple_shapes_dataset",
     "pingouin (>=0.6.1,<0.7.0)",
     "scikit-image (>=0.26.0,<0.27.0)",
+    "mpltern (>=1.0.4,<2.0.0)",
 ]
 
 [tool.poetry.group.dev.dependencies]

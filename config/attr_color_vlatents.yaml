@@ -35,7 +35,7 @@ training:
         end_lr: 1e-5
         pct_start: 0.03
 
-    max_steps: 300000
+    max_steps: 8000
     devices: 1
 
 

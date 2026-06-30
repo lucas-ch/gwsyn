@@ -26,7 +26,6 @@ if root_path not in sys.path:
  
 from syn_project.utils_train import *
 from syn_project.utils_color_analysis import *
-from syn_project.utils_notebook import *
 
 CAT2IDX = {"Diamond": 0, "Egg": 1, "Triangle": 2}
 
@@ -89,46 +88,6 @@ def get_data_samples(data_module:SimpleShapesDataModule, n_samples:int, split="t
 
     return train_samples
 
-def split_softmax_category_attributes(concat_tensor: torch.Tensor) -> list[torch.Tensor]:
-    """
-    Sépare un tenseur (N, 8) en deux tenseurs :
-    - Les 3 premiers (logits -> probabilités 0-1)
-    - Les 5 derniers (inchangés)
-    """
-    # 1. Extraction des 3 premières colonnes (logits)
-    logits = concat_tensor[:, :3]
-    
-    # 2. Conversion en probabilités (entre 0 et 1)
-    # On utilise softmax sur la dimension 1 pour que la somme = 1
-    # Si les 3 attributs sont indépendants, utilise torch.sigmoid(logits) à la place
-    probs = F.softmax(logits, dim=1)
-    
-    # 3. Extraction des 5 colonnes restantes
-    rest = concat_tensor[:, 3:]
-    
-    # Retourne une liste de deux tenseurs comme dans ton premier exemple
-    return [probs, rest]
-
-def split_binary_category_attributes(concat_tensor: torch.Tensor) -> list[torch.Tensor]:
-    """
-    Sépare un tenseur (N, 8) en deux tenseurs :
-    - Les 3 premiers (logits -> convertis en 0 ou 1 exclusifs)
-    - Les 5 derniers (inchangés)
-    """
-    # 1. Extraction des 3 premières colonnes (logits)
-    logits = concat_tensor[:, :3]
-    
-    # 2. Trouver l'indice de la classe dominante (ex: index 1)
-    predicted_indices = torch.argmax(logits, dim=1)
-    
-    # 3. Convertir en vecteur One-Hot (ex: [0, 1, 0])
-    # num_classes=3 garantit qu'on a bien 3 colonnes en sortie
-    binary_preds = F.one_hot(predicted_indices, num_classes=3).float()
-    
-    # 4. Extraction des 5 colonnes restantes
-    rest = concat_tensor[:, 3:]
-    
-    return [binary_preds, rest]
 
 @contextmanager
 def total_silence():
@@ -218,8 +177,7 @@ def get_colors_labels_per_condition(condition: str, data = "biased_00", settings
     x0_v = x0[frozenset({'v_latents'})]
     g0_v         = gw_mod.encode(x0_v)['v_latents']
     x1    = gw_mod.decode(g0_v, domains={'attr'})
-    x1['attr'] = split_binary_category_attributes(x1['attr'])
-    t = global_workspace.encode_domains({frozenset({'attr'}): x1})
+    t = global_workspace.encode_domains(x1)
  
     # attr → color
     x1_attr = t[frozenset({'attr'})]
@@ -603,7 +561,8 @@ def get_action_from_v_latents(
     scores = {name: float(weights.get(name, 0.0)) for name in score_names}
 
     # --- 1. encode root_input_domain -> g ---
-    latents_source = latent_domains[frozenset({cfg.root_input_domain})]
+    key = next(k for k in latent_domains.keys() if len(k) > 1)
+    latents_source = latent_domains[key]
     g = gw_mod.encode(latents_source)[cfg.root_input_domain]
 
     # --- 2. decode(g) -> x (domaines bruts demandés) ---

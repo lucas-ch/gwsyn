@@ -14,7 +14,7 @@ global_workspace:
             color: 256
             cat: 256
             position: 256
-            action: 64
+            action: 32
         n_layers: 2
 
     decoders:
@@ -25,7 +25,7 @@ global_workspace:
             color: 256
             cat: 256
             position: 256
-            action: 64
+            action: 32
         n_layers: 2
 
 training:
@@ -37,7 +37,7 @@ training:
         end_lr: 1e-5
         pct_start: 0.03
 
-    max_steps: 300000
+    max_steps: 6000
     devices: 1
 
 

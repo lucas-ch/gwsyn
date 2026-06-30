@@ -69,12 +69,11 @@ DOMAIN_CONFIGS = {
 }
 
 class CustomFlexibleCheckpoint(Callback):
-    def __init__(self, project_name, experiment_name, dirpath, switch_epoch=None):
+    def __init__(self, project_name, experiment_name, dirpath):
         super().__init__()
         self.project_name = project_name
         self.experiment_name = experiment_name
         self.dirpath = dirpath
-        self.switch_epoch = switch_epoch
 
         os.makedirs(dirpath, exist_ok=True)
 
@@ -82,14 +81,10 @@ class CustomFlexibleCheckpoint(Callback):
         epoch = trainer.current_epoch + 1
         should_save = False
 
-        if epoch < 10:
+        if epoch in [1, 2, 5, 10, 20, 40, 60, 80, 100]:
             should_save = True
-
-        else:
-                if epoch in [1, 10, 20, 40, 60, 80, 100]:
-                    should_save = True
-                elif epoch > 100 and epoch % 50 == 0:
-                    should_save = True
+        elif epoch > 100 and epoch % 50 == 0:
+            should_save = True
 
         if should_save:
             ckpt_path = f"{self.dirpath}/save-epoch={epoch}.ckpt"
@@ -117,7 +112,9 @@ def get_global_workspace(project_name, experiment_name, checkpoint_path=None, ep
     config = training_params["config"]
     hparams = training_params["hparams"] if "hparams" in training_params else {"temperature": 1, "alpha": 1}
     apply_custom_init = training_params["apply_custom_init"]
-    attention_tree_config = training_params["attention_tree_config"] if "hparams" in training_params else None
+    attention_tree_config = training_params["attention_tree_config"] if "attention_tree_config" in training_params else None
+    attention_init = training_params["attention_init"] if "attention_init" in training_params else None
+    attetion_weight = training_params["attetion_weight"] if "attetion_weight" in training_params else 1.0
 
     # Construire les arguments nécessaires à MyGlobalWorkspace
     global_workspace, domain_modules = setup_global_workspace(
@@ -127,7 +124,9 @@ def get_global_workspace(project_name, experiment_name, checkpoint_path=None, ep
         apply_custom_init,
         load_from_checkpoint=False,  # Ne pas charger ici
         modules=modules,
-        attention_tree_config=attention_tree_config
+        attention_tree_config=attention_tree_config,
+        attention_init=attention_init,
+        attention_weight=attetion_weight
     )
 
     # Charger directement via Lightning, qui gère les shape mismatches proprement
@@ -142,6 +141,7 @@ def get_global_workspace(project_name, experiment_name, checkpoint_path=None, ep
         workspace_dim=config.global_workspace.latent_dim,
         loss_coefs=config.global_workspace.loss_coefficients,
         attention_tree_config=attention_tree_config,
+        attention_init=attention_init
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -225,15 +225,20 @@ def load_global_workspace_from_checkpoint(global_workspace, gw_checkpoint_path):
         }
         missing_modules = all_modules - present_modules
 
+        IGNORED_KEYS = {
+            "loss_mod.attention_loss.attention.raw_weights"
+            }
+
+
         filtered_state_dict = {
             key: value
             for key, value in full_state_dict.items()
-            if not key.startswith(gw_prefixes)
+            if key not in IGNORED_KEYS and (not key.startswith(gw_prefixes)
             or any(
                 key.startswith(f"{prefix}{module}.")
                 for prefix in gw_prefixes
                 for module in present_modules
-            )
+            ))
         }
 
         missing_keys, unexpected_keys = global_workspace.load_state_dict(filtered_state_dict, strict=False)
@@ -302,7 +307,9 @@ def build_global_workspace(
     modules_to_freeze,
     fusion_activation_fn,
     attention_tree_config,
+    attention_init,
     apply_custom_init: bool,
+    attention_weight
 ) -> MyGlobalWorkspace:
     if apply_custom_init:
         for encoder in gw_encoders.values():
@@ -324,6 +331,8 @@ def build_global_workspace(
         scheduler=lambda opt, stype="onecycle": get_scheduler(opt, config, stype),
         fusion_activation_function=fusion_activation_fn,
         attention_tree_config=attention_tree_config,
+        attention_init=attention_init,
+        attention_weight=attention_weight
     )
 
     gw.domain_mods["v_latents"].freeze()
@@ -343,6 +352,8 @@ def setup_global_workspace(
     modules_to_freeze: list = [],
     fusion_activation_fn=torch.nn.Identity(),
     attention_tree_config=None,
+    attention_init=None,
+    attention_weight=1.0
 ):
     checkpoint_path = Path(get_project_root()) / "checkpoints"
 
@@ -359,7 +370,8 @@ def setup_global_workspace(
     global_workspace = build_global_workspace(
         config, domain_modules, gw_encoders, gw_decoders,
         custom_weights, noise, modules_to_freeze,
-        fusion_activation_fn, attention_tree_config, apply_custom_init,
+        fusion_activation_fn, attention_tree_config,
+        attention_init, apply_custom_init,attention_weight
     )
 
     if load_from_checkpoint and gw_checkpoint_path is not None:
@@ -395,8 +407,7 @@ def setup_data_module(data_path, config:Config, exclude_colors=True, modules=['a
 
 def setup_logger_and_callbacks(config, 
                                experiment_name="gw_no_color", 
-                               project_name="shimmer-ssd",
-                               switch_epoch=0):
+                               project_name="shimmer-ssd"):
     """
     Set up logging and callbacks for training.
     
@@ -438,8 +449,7 @@ def setup_logger_and_callbacks(config,
         CustomFlexibleCheckpoint(
             project_name= project_name,
             experiment_name= experiment_name,
-            dirpath=version_dir,
-            switch_epoch=switch_epoch)    
+            dirpath=version_dir)    
         ]
     
     return logger, callbacks, version_dir
@@ -453,13 +463,14 @@ def train_global_workspace(
     exclude_colors=True,
     load_from_checkpoint=True,
     gw_checkpoint_path=None,
-    switch_epoch=0,
     custom_weights=None,
     noise=None,
     modules=['attr', 'v_latents'],
     modules_to_freeze=[],
     fusion_activation_fn=torch.tanh,
-    attention_tree_config=None):
+    attention_tree_config=None,
+    attention_init=None,
+    attention_weight=1.0):
     """
     Train a global workspace model with the given configuration.
     
@@ -491,9 +502,11 @@ def train_global_workspace(
         modules=modules,
         modules_to_freeze=modules_to_freeze,
         fusion_activation_fn=fusion_activation_fn,
-        attention_tree_config=attention_tree_config)
+        attention_tree_config=attention_tree_config,
+        attention_init=attention_init,
+        attention_weight=attention_weight)
     
-    logger, callbacks, checkpoint_dir = setup_logger_and_callbacks(config, experiment_name, project_name, switch_epoch)
+    logger, callbacks, checkpoint_dir = setup_logger_and_callbacks(config, experiment_name, project_name)
     callbacks.append(FixAttentionLR(attention_lr=global_workspace.attention_lr, attention_group_idx=1))
     
     hparams_to_log = {
@@ -510,13 +523,11 @@ def train_global_workspace(
         "batch_size": config.training.batch_size,
         "seed": config.seed, # Log seed if set in config
         "exclude_colors": exclude_colors, # Logging the setting used for this run
-        "switch_epoch": switch_epoch
     }
     logger.log_hyperparams(hparams_to_log)
 
     trainer = Trainer(
         logger=logger,
-        max_epochs=30,
         default_root_dir=config.default_root_dir,
         callbacks=callbacks,
         precision=config.training.precision,

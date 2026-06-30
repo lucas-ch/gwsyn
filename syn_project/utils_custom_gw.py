@@ -77,12 +77,11 @@ def remove_action_from_data(data):
     return new_data
 
 class CombinedGWLosses(nn.Module):
-    def __init__(self, attention_loss: MyAttentionGWLosses, custom_loss: MyCustomGWLosses, attention_weight=1.0, custom_weight=1.0):
+    def __init__(self, attention_loss: MyAttentionGWLosses, custom_loss: MyCustomGWLosses, attention_weight=1.0):
         super().__init__()
         self.attention_loss = attention_loss
         self.custom_loss = custom_loss
         self.attention_weight = attention_weight
-        self.custom_weight = custom_weight
 
     @property
     def attention(self):
@@ -106,8 +105,7 @@ class CombinedGWLosses(nn.Module):
         out_custom = self.custom_loss.step(raw_data_custom, domain_latents_custom, mode)
 
         combined_loss = (
-            self.attention_weight * out_attention.loss +
-            self.custom_weight * out_custom.loss
+            self.attention_weight * out_attention.loss + out_custom.loss
         )
 
         # Merge des métriques avec préfixes pour distinguer dans wandb
@@ -129,10 +127,12 @@ class MyGlobalWorkspace(GlobalWorkspace2Domains):
             custom_weights,
             noise,
             attention_tree_config=None,
+            attention_init=None,
             fusion_activation_function = torch.nn.Identity(),
             modules_to_freeze=[],
             attention_lr=1e-1,
             attention_weight_decay=0.0,
+            attention_weight=1.0,
             *args,
             **kwargs):
         kwargs.pop('fusion_activation_fn', None)
@@ -152,7 +152,8 @@ class MyGlobalWorkspace(GlobalWorkspace2Domains):
             self.domain_mods,
             loss_coefs,
             contrastive_loss,
-            attention_tree_config
+            attention_tree_config,
+            attention_init
         )
 
         domain_mods_custom_loss = {k: self.domain_mods[k] for k in self.domain_mods.keys() - {'action'}}
@@ -170,8 +171,7 @@ class MyGlobalWorkspace(GlobalWorkspace2Domains):
         self.loss_mod = CombinedGWLosses(
             attention_losses,
             custom_losses,
-            attention_weight=1.0,
-            custom_weight=1.0
+            attention_weight=attention_weight
 )
         
     def configure_optimizers(self):

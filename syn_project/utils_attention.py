@@ -78,12 +78,12 @@ class SimpleWeightSelection(SelectionBase):
     def forward(
         self, domains: LatentsDomainGroupT, encodings_pre_fusion: LatentsDomainGroupT
     ) -> dict[str, torch.Tensor]:
-        bs = next(iter(domains.values())).size(0)
+        batch_size = next(iter(domains.values())).size(0)
         device = next(iter(domains.values())).device
         weights = torch.softmax(self.raw_weights, dim=0)
         selection = {}
         for i, name in enumerate(self.domain_names):
-            selection[name] = weights[i].expand(bs).to(device)
+            selection[name] = weights[i].expand(batch_size).to(device)
         return selection
 
 @dataclass
@@ -118,6 +118,7 @@ class MyAttentionGWLosses(GWLosses2Domains):
         loss_coefs,
         contrastive_fn,
         tree_config: Optional[AttentionTreeConfig] = None,
+        init_weights=None
     ):
         super().__init__(gw_mod, selection_mod, domain_mods, loss_coefs, contrastive_fn)
 
@@ -127,7 +128,7 @@ class MyAttentionGWLosses(GWLosses2Domains):
 
         self.attention = SimpleWeightSelection(
             domain_names=tuple(score_names),
-            init_weights=None)
+            init_weights=init_weights)
 
     def _compute_leaves(
         self, domain_latents: "LatentsDomainGroupsT", key: frozenset
@@ -137,7 +138,6 @@ class MyAttentionGWLosses(GWLosses2Domains):
 
         g = self.gw_mod.encode(domain_latents[key])[cfg.root_input_domain]
         x = self.gw_mod.decode(g)
-        g1 = self.gw_mod.encode(x)
 
         leaves: Dict[str, torch.Tensor] = {}
         g_level0: Dict[str, torch.Tensor] = {}
@@ -149,13 +149,14 @@ class MyAttentionGWLosses(GWLosses2Domains):
             leaves[dom] = g_dom
 
         for dom in cfg.level1_domains:
-            g_dom = g1[dom]
+            g_dom = self.gw_mod.encode(x)[dom]
             g_level1[dom] = g_dom
             leaves[dom] = g_dom
 
         for spec in cfg.level2_domains:
-            x_from = self.gw_mod.decode(g1[spec.from_domain])
-            g_target = self.gw_mod.encode(x_from)[spec.target_domain]
+            g_from = self.gw_mod.encode(x)[spec.from_domain]
+            x_target = self.gw_mod.decode(g_from)
+            g_target = self.gw_mod.encode(x_target)[spec.target_domain]
             leaves[spec.get_score_name()] = g_target
 
         return leaves
