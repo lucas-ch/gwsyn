@@ -105,7 +105,7 @@ class CombinedGWLosses(nn.Module):
         out_custom = self.custom_loss.step(raw_data_custom, domain_latents_custom, mode)
 
         combined_loss = (
-            self.attention_weight * out_attention.loss + out_custom.loss
+            self.attention_weight * out_attention.loss + 10.0 * out_custom.loss
         )
 
         # Merge des métriques avec préfixes pour distinguer dans wandb
@@ -128,7 +128,7 @@ class MyGlobalWorkspace(GlobalWorkspace2Domains):
             noise,
             attention_tree_config=None,
             attention_init=None,
-            fusion_activation_function = torch.nn.Identity(),
+            fusion_activation_function = torch.tanh,
             modules_to_freeze=[],
             attention_lr=1e-1,
             attention_weight_decay=0.0,

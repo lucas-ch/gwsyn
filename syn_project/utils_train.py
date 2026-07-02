@@ -350,7 +350,7 @@ def setup_global_workspace(
     noise=None,
     modules: list[str] = ("attr", "v_latents"),
     modules_to_freeze: list = [],
-    fusion_activation_fn=torch.nn.Identity(),
+    fusion_activation_fn=torch.tanh,
     attention_tree_config=None,
     attention_init=None,
     attention_weight=1.0
@@ -528,6 +528,7 @@ def train_global_workspace(
 
     trainer = Trainer(
         logger=logger,
+        max_epochs=30,
         default_root_dir=config.default_root_dir,
         callbacks=callbacks,
         precision=config.training.precision,

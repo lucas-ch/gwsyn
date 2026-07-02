@@ -8,8 +8,8 @@ torch.autograd.set_detect_anomaly(True)
 if __name__ == "__main__":
 
     project_name = "syn"
-    condition = "debug"
-    data = "biased_00"
+    condition = "biased_50"
+    data = "biased_50"
 
     modules = ['attr', 'v_latents', 'color']
     modules_to_freeze = []
@@ -21,7 +21,7 @@ if __name__ == "__main__":
         "alpha": 0.5
     }
 
-    attention_weight = 0
+    attention_weight = 0.0
 
     attention_tree_config = None
 
