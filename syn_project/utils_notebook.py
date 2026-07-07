@@ -3,6 +3,7 @@ import sys
 import warnings
 from contextlib import redirect_stdout, redirect_stderr, contextmanager
 from typing import cast
+from typing import NamedTuple
 
 import pandas as pd
 import numpy as np
@@ -13,6 +14,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, accuracy_score
 from sklearn.preprocessing import StandardScaler
+from skimage.metrics import structural_similarity as ssim
 
 import torch
 import torch.nn.functional as F
@@ -201,76 +203,6 @@ def get_colors_labels_per_condition(condition: str, data = "biased_00", settings
     return colors_x2, colors_xvision4, labels
 
 
-def run_conditions(
-    conditions: list,
-    cat_names: dict = None,
-    value: float = 0.85,
-    saturation_boost: float = 1.4,
-    plot: bool = True,
-    plots_per_row: int = 3,
-) -> pd.DataFrame:
-    """
-    Itère sur une liste de conditions, calcule F et LDA pour chacune.
-
-    Parameters
-    ----------
-    conditions    : list de valeurs passées une à une à load_fn
-    load_fn       : callable(condition) → (colors_np, labels)
-                    Doit retourner un tuple (array RGB, array labels).
-    cat_names     : dict de noms de catégories (partagé entre conditions)
-    value         : luminosité pour l'affichage
-    saturation_boost : boost de saturation pour l'affichage
-    plot          : bool, afficher les histogrammes
-    plots_per_row : int, nombre de graphes par ligne
-
-    Returns
-    -------
-    pd.DataFrame avec colonnes : condition, F, p, lda
-    """
-    results = []
-
-    if plot:
-        n = len(conditions)
-        ncols = min(plots_per_row, n)
-        nrows = (n + ncols - 1) // ncols
-        fig, axs = plt.subplots(nrows, ncols,
-                                figsize=(6 * ncols, 4 * nrows),
-                                squeeze=False)
-
-    for idx, condition in enumerate(conditions):
-        print(f"\n── Condition : {condition} ──")
-        _, colors_np, labels = get_colors_labels_per_condition(condition)
-
-        if plot:
-            row, col = divmod(idx, plots_per_row)
-            ax = axs[row][col]
-            metrics = hue_analysis(
-                colors_np, labels,
-                cat_names=cat_names,
-                value=value,
-                saturation_boost=saturation_boost,
-                title=str(condition),
-                ax=ax,
-            )
-        else:
-            metrics = compute_hue_metrics(colors_np, labels)
-            print(f"LDA = {metrics['lda_score']:.2%}")
-
-        results.append({'condition': condition, **metrics})
-
-    if plot:
-        # Masquer les axes vides si le nombre de conditions ne remplit pas la grille
-        for idx in range(len(conditions), nrows * plots_per_row):
-            row, col = divmod(idx, plots_per_row)
-            axs[row][col].set_visible(False)
-        plt.tight_layout()
-        plt.show()
-
-    return pd.DataFrame(results).set_index('condition')
-
-from typing import NamedTuple
-
-
 class ModuleDataOutputs(NamedTuple):
     global_workspace: torch.Tensor
     domain_mods: list
@@ -451,6 +383,29 @@ def logistic_probe(X: np.ndarray, y: np.ndarray, test_size: float = 0.2, random_
         "scaler": scaler,
     }
 
+def compute_reconstruction_quality(original_rgb, decoded_rgb):
+    """
+    original_rgb, decoded_rgb : tensors ou numpy (N, H, W, 3) ou (N, 3, H, W), valeurs dans [0,1].
+    Retourne dict avec mse, ssim_mean.
+    """
+    # → numpy (N, H, W, 3) dans [0,1]
+    def to_nhwc(x):
+        if isinstance(x, torch.Tensor):
+            x = x.detach().cpu().numpy()
+        if x.ndim == 4 and x.shape[1] == 3:   # (N,3,H,W)
+            x = x.transpose(0, 2, 3, 1)
+        return x.astype(np.float32)
+
+    orig = to_nhwc(original_rgb)
+    dec  = to_nhwc(decoded_rgb)
+
+    mse  = float(np.mean((orig - dec) ** 2))
+    ssim_scores = [
+        ssim(orig[i], dec[i], channel_axis=-1, data_range=1.0)
+        for i in range(len(orig))
+    ]
+    return {"mse": mse, "ssim": float(np.mean(ssim_scores))}
+
 def evaluate_robust_transfer(objects, category, n_per_cat=3, n_iterations=50):
     """
     Exécute l'évaluation n_iterations fois pour obtenir des stats robustes.
@@ -518,97 +473,448 @@ class AttentionTreeConfig:
         names += [spec.get_score_name() for spec in self.level2_domains]
         return names
 
-
-def get_action_from_v_latents(
-    latent_domains,
-    gw_mod,
-    global_workspace,
-    modules_name,
-    tree_config: Optional[AttentionTreeConfig] = None,
-    fixed_weights: Optional[Dict[str, float]] = None,
-):
-    """
-    Reproduit les mêmes chemins que MyAttentionGWLosses._compute_leaves /
-    step, mais en partant de v_latents comme entrée unique (pas de raw_data,
-    pas de module d'attention appris -- les poids sont fixes, passés ou
-    par défaut).
-
-    Args:
-        latent_domains: dict de LatentsDomainGroupsT (comme dans la fonction
-            d'origine).
-        gw_mod: le module GW (encode/decode).
-        global_workspace: utilisé pour encode_domains après split_binary_category_attributes.
-        modules_name: domaines à décoder lors du passage GW -> domaines bruts.
-        tree_config: config de l'arbre (par défaut si non fournie).
-        fixed_weights: dict {score_name: poids}. Si une clé est absente,
-            poids 0.0 par défaut. Pas de softmax/normalisation -- les poids
-            sont utilisés tels quels (pondération libre, pour debug).
-
-    Returns:
-        dict avec 'original_category', 'action', 'z', 'leaves', 'scores'.
-    """
-    cfg = tree_config or AttentionTreeConfig(
-        root_input_domain="v_latents",
-        level1_domains=["attr"],
-        level2_domains=[
-            Level2Spec(from_domain="attr", target_domain="color", score_name="color2"),
-        ],
-    )
-
-    score_names = cfg.all_score_names()
-    weights = fixed_weights or {}
-    # poids par défaut 0.0 pour toute feuille non spécifiée
-    scores = {name: float(weights.get(name, 0.0)) for name in score_names}
-
-    # --- 1. encode root_input_domain -> g ---
-    key = next(k for k in latent_domains.keys() if len(k) > 1)
-    latents_source = latent_domains[key]
-    g = gw_mod.encode(latents_source)[cfg.root_input_domain]
-
-    # --- 2. decode(g) -> x (domaines bruts demandés) ---
-    x = gw_mod.decode(g, domains=modules_name)
-    g1 = gw_mod.encode(x)
+def _compute_leaves(gw_mod, domain_latents: dict, key: frozenset, tree_config) -> Dict[str, torch.Tensor]:
+    """Reproduit exactement MyAttentionGWLosses._compute_leaves."""
+    cfg = tree_config
+    g = gw_mod.encode(domain_latents[key])[cfg.root_input_domain]
+    x = gw_mod.decode(g)
 
     leaves: Dict[str, torch.Tensor] = {}
-    g_level1: Dict[str, torch.Tensor] = {}
-    g_level0: Dict[str, torch.Tensor] = {}
 
     for dom in cfg.level0_domains:
-        g_dom = gw_mod.encode(latents_source)[dom]
-        g_level0[dom] = g_dom
-        leaves[dom] = g_dom
+        leaves[dom] = gw_mod.encode(domain_latents[key])[dom]
 
     for dom in cfg.level1_domains:
-        g_dom = g1[dom]
-        g_level1[dom] = g_dom
-        leaves[dom] = g_dom
+        leaves[dom] = gw_mod.encode(x)[dom]
 
     for spec in cfg.level2_domains:
-        x_from = gw_mod.decode(g1[spec.from_domain], domains={spec.target_domain})
-        g_target = gw_mod.encode(x_from)[spec.target_domain]
-        leaves[spec.get_score_name()] = g_target
+        g_from = gw_mod.encode(x)[spec.from_domain]
+        x_target = gw_mod.decode(g_from)
+        leaves[spec.get_score_name()] = gw_mod.encode(x_target)[spec.target_domain]
 
-    # --- 5. combinaison pondérée (poids fixes, pas de softmax) ---
-    z = sum(scores[name] * leaves[name] for name in leaves)
+    return leaves
 
-    # g_task = gw_mod.encode(latent_domains[frozenset({'task'})])["task"]
-    # z = z + 0.5 * g_task
 
-    # --- 6. decode z -> action ---
-    action = gw_mod.decode(z, domains={"action"})["action"]
+@torch.no_grad()
+def compute_classifier_accuracy(
+    gw_mod,
+    latent_domains: dict,
+    key: frozenset,
+    tree_config,
+    fixed_weights: Dict[str, float],
+    target: torch.Tensor,
+) -> float:
+    """
+    Calcule l'accuracy du classifieur d'attention (poids fixes appris) sur un split donné.
+    Reproduit step() de MyAttentionGWLosses en remplaçant self.attention par les poids fixes.
+    """
+    leaves = _compute_leaves(gw_mod, latent_domains, key, tree_config)
+    if not leaves:
+        return float("nan")
 
-    # --- 7. catégorie d'origine, pour comparaison ---
-    original_latents = latent_domains[frozenset(modules_name)]
-    original_attr = original_latents["attr"]
-    if isinstance(original_attr, (list, tuple)):
-        original_category = torch.argmax(original_attr[0], dim=1)
+    z = sum(fixed_weights[name] * leaves[name] for name in leaves)
+    pred_logits = gw_mod.decode(z)["action"]
+    pred = torch.argmax(pred_logits, dim=1)
+
+    return (pred == target).float().mean().item()
+
+
+
+def _get_category_labels(original_data: dict, modules_name: Sequence[str]) -> torch.Tensor:
+    """Récupère les labels de catégorie, que ce soit via 'attr' ou 'cat'."""
+    if "attr" in modules_name:
+        return original_data["attr"][0]
+    if "cat" in modules_name:
+        return original_data["cat"]
+    raise KeyError(f"Ni 'attr' ni 'cat' trouvés dans modules_name={modules_name}")
+
+def load_fixed_weights_from_checkpoint(condition: str, checkpoint_epoch: int, score_names: List[str]) -> Dict[str, float]:
+    """Charge les raw_weights depuis le checkpoint et renvoie les poids softmax fixes."""
+
+    checkpoint_path = f"{root_path}/checkpoints/syn/{condition}/checkpoints/last.ckpt"
+    if checkpoint_epoch > 0:
+        checkpoint_path = f"{root_path}/checkpoints/syn/{condition}/checkpoints/save-epoch={checkpoint_epoch}.ckpt"
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    state_dict = checkpoint["state_dict"]
+
+    raw_weights_key = next((k for k in state_dict if "raw_weights" in k), None)
+    if raw_weights_key is None:
+        print(f"[SKIP] {condition} : pas de raw_weights")
+        return {}
+
+    raw_weights = state_dict[raw_weights_key]
+
+    softmax_weights = torch.softmax(raw_weights, dim=0)
+    return {name: softmax_weights[i].item() for i, name in enumerate(score_names)}
+
+def evaluate_condition(
+    condition: str,
+    start_vision: Sequence[bool],
+    n_samples_test: int,
+    split: str,
+    checkpoint_epoch: int,
+    cat_names: Sequence[str],
+    modality_kwargs: dict,
+    compute_accuracy: bool = True,
+) -> List[dict]:
+    """Calcule les métriques (ssim, lda_score, accuracy) pour une condition, pour chaque valeur de start_v."""
+    rows: List[dict] = []
+
+    with total_silence():
+        (global_workspace, domain_mods, gw_mod,
+         visual_module, original_data,
+         latent_domains, modules_name) = get_modules_data_from_exp(
+            experiment_name=condition,
+            n_samples_test=n_samples_test,
+            split=split,
+            checkpoint_epoch=checkpoint_epoch,
+        )
+
+    original_images_rgb = visual_module.decode_images(original_data["v_latents"])
+    cat = _get_category_labels(original_data, modules_name)
+    cats_np = cat.argmax(dim=1).detach().cpu().numpy()
+    target = cat.argmax(dim=1).long()
+
+    # --- accuracy du classifieur d'attention (poids fixes appris), une seule fois par condition ---
+    accuracy = float("nan")
+    fixed_weights: Dict[str, float] = {}
+    if compute_accuracy:
+        training_params = get_training_params("syn", condition)
+        tree_config = training_params["attention_tree_config"]
+        score_names = tree_config.all_score_names()
+        fixed_weights = load_fixed_weights_from_checkpoint(condition, checkpoint_epoch, score_names)
+        if fixed_weights:
+            key = frozenset(modules_name)
+            accuracy = compute_classifier_accuracy(
+                gw_mod, latent_domains, key, tree_config, fixed_weights, target,
+            )
+
+    for start_v in start_vision:
+        objects = get_objects_from_v_latents(
+            latent_domains, gw_mod, global_workspace, modules_name,
+            start_v=start_v, **modality_kwargs,
+        )
+
+        decoded_images = visual_module.decode_images(objects["vision2"])
+        recon = compute_reconstruction_quality(original_images_rgb, decoded_images)
+
+        colors_np = np.clip(
+            (objects["x2"]["color"].detach().cpu().numpy() + 1) / 2, 0, 1
+        )
+        metrics, _ = hue_analysis(
+            colors_np, cats_np,
+            cat_names=cat_names,
+            value=0.75, saturation_boost=1.8,
+        )
+        logistic_probe(colors_np, cats_np)  # calculé pour effet de bord / cohérence, non stocké ici
+
+        row = {
+            "condition": condition,
+            "start_v": start_v,
+            "ssim": recon["ssim"],
+            "lda_score": metrics["lda_score"],
+            "accuracy": accuracy,
+        }
+
+        row.update({f"weight_{name}": w for name, w in fixed_weights.items()})
+        rows.append(row)
+
+        del decoded_images, objects
+        torch.cuda.empty_cache()
+
+    return rows
+
+def compute_metrics_table(
+    conditions: Sequence[str],
+    start_vision: Sequence[bool],
+    cat_names: Sequence[str],
+    n_samples_test: int = 1000,
+    split: str = "test",
+    checkpoint_epoch: int = 0,
+    modality_kwargs: dict | None = None,
+    compute_accuracy: bool = True,
+) -> pd.DataFrame:
+    if modality_kwargs is None:
+        modality_kwargs = dict(
+            modality_from="attr",
+            modality_through="color",
+            modality_main=["attr"],
+            modality_add="color",
+        )
+
+    rows: List[dict] = []
+    for condition in conditions:
+        rows.extend(
+            evaluate_condition(
+                condition=condition,
+                start_vision=start_vision,
+                n_samples_test=n_samples_test,
+                split=split,
+                checkpoint_epoch=checkpoint_epoch,
+                cat_names=cat_names,
+                modality_kwargs=modality_kwargs,
+                compute_accuracy=compute_accuracy,
+            )
+        )
+
+    df = pd.DataFrame(rows).set_index("condition")
+    return df
+
+
+def display_metrics_table(df: pd.DataFrame):
+    """Affichage stylé (Jupyter) du tableau de métriques."""
+    numeric_cols = [c for c in ("ssim", "lda_score", "accuracy") if c in df.columns]
+    weight_cols = [c for c in df.columns if c.startswith("weight_")]
+    fmt = {c: "{:.3f}" for c in numeric_cols}
+    fmt.update({c: "{:.3f}" for c in weight_cols})
+    return (
+        df.style
+        .format(fmt)
+        .background_gradient(subset=numeric_cols, cmap="RdYlGn")
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 2. Poids d'attention fixes par condition (+ graphe)
+# --------------------------------------------------------------------------- #
+
+
+def compute_attention_weights(
+    conditions: Sequence[str],
+    key_dims: Sequence[str],
+    checkpoint_epoch: int,
+) -> Dict[str, Dict[str, float]]:
+    """
+    Pour chaque condition : charge le tree_config d'entraînement, extrait les poids
+    fixes (softmax des raw_weights) et les renormalise sur `key_dims` uniquement.
+    """
+    all_weights: Dict[str, Dict[str, float]] = {}
+
+    for condition in conditions:
+        training_params = get_training_params("syn", condition)
+        tree_config = training_params["attention_tree_config"]
+        score_names = tree_config.all_score_names()
+
+        fixed_weights = load_fixed_weights_from_checkpoint(condition, checkpoint_epoch, score_names)
+        if not fixed_weights:
+            continue
+
+        sub = {k: fixed_weights.get(k, 0.0) for k in key_dims}
+        total = sum(sub.values())
+        all_weights[condition] = {k: v / total for k, v in sub.items()}
+
+    return all_weights
+
+
+def plot_attention_weights(
+    all_weights: Dict[str, Dict[str, float]],
+    key_dims: Sequence[str],
+    x_labels: Optional[Dict[str, str]] = None,
+    subplot_titles: Optional[Dict[str, str]] = None,
+    colors: Union[Sequence[str], Dict[str, str]] = ("#534AB7", "#1D9E75", "#EF9F27", "#E15759", "#76B7B2"),
+    figsize_per_plot: float = 3.0,
+    suptitle: Optional[str] = "Poids d'attention par condition",
+):
+    x_labels = x_labels or {}
+    subplot_titles = subplot_titles or {}
+ 
+    # Résolution des couleurs par dimension, quel que soit le format d'entrée
+    if isinstance(colors, dict):
+        color_map = {dim: colors.get(dim, "#888888") for dim in key_dims}
     else:
-        original_category = torch.argmax(original_attr, dim=1)
-
-    return {
-        "original_category": original_category,
-        "action": action,
-        "z": z,
-        "leaves": leaves,
-        "scores": scores,
-    }
+        palette = list(colors)
+        color_map = {dim: palette[i % len(palette)] for i, dim in enumerate(key_dims)}
+    bar_colors = [color_map[dim] for dim in key_dims]
+    tick_labels = [x_labels.get(dim, dim) for dim in key_dims]
+ 
+    n = len(all_weights)
+    fig, axes = plt.subplots(1, n, figsize=(figsize_per_plot * n, 4.5), sharey=True)
+    if n == 1:
+        axes = [axes]
+ 
+    for ax, (condition, weights) in zip(axes, all_weights.items()):
+        values = [weights[k] for k in key_dims]
+        bars = ax.bar(key_dims, values, color=bar_colors, width=0.6)
+        ax.set_title(subplot_titles.get(condition, condition), fontsize=9)
+        ax.set_ylim(0, 1.15)  # marge au-dessus de 1.0 pour que les labels ne dépassent pas
+        ax.set_xticks(range(len(key_dims)))
+        ax.set_xticklabels(tick_labels, rotation=30, ha="right", fontsize=8)
+        for bar, val in zip(bars, values):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2, val + 0.02, f"{val:.2f}",
+                ha="center", va="bottom", fontsize=8,
+            )
+ 
+    axes[0].set_ylabel("proportion")
+ 
+    if suptitle:
+        fig.suptitle(suptitle, fontsize=11)
+        fig.tight_layout(rect=[0, 0, 1, 0.93])  # réserve de la place en haut pour le suptitle
+    else:
+        fig.tight_layout()
+ 
+    plt.show()
+    return fig, axes
+ 
+def build_publication_table(
+    metrics_df: pd.DataFrame,
+    n_neurons: Dict[str, int],
+    include_columns: Optional[Sequence[str]] = None,
+    rename_map: Optional[Dict[str, str]] = None,
+    decimals: int = 2,
+    start_v: Optional[bool] = None,
+    n_neurons_column_name: str = "n_neurons",
+) -> pd.DataFrame:
+    """
+    Construit un DataFrame prêt pour publication à partir de metrics_df.
+ 
+    Args:
+        metrics_df: sortie de compute_metrics_table (index = 'condition').
+        n_neurons: mapping {condition: nombre de neurones} à ajouter comme colonne.
+        include_columns: liste des colonnes à garder, dans l'ordre souhaité
+            (noms *avant* renommage, ex. ["condition", "n_neurons", "accuracy", "ssim"]).
+            Si None, toutes les colonnes de metrics_df + n_neurons sont gardées.
+        rename_map: mapping {nom_original: nom_affiché} appliqué après la sélection
+            (ex. {"ssim": "SSIM", "lda_score": "LDA", "accuracy": "Accuracy (%)"}).
+        decimals: nombre de chiffres après la virgule pour les colonnes numériques.
+        start_v: si metrics_df contient plusieurs lignes par condition (colonne 'start_v'),
+            filtre sur cette valeur avant de construire le tableau. Si None et que
+            plusieurs valeurs de start_v existent, lève une erreur explicite.
+        n_neurons_column_name: nom de la colonne créée pour le nombre de neurones.
+ 
+    Returns:
+        DataFrame propre, une ligne par condition, colonnes sélectionnées/renommées,
+        valeurs numériques arrondies.
+    """
+    df = metrics_df.reset_index()  # remet 'condition' en colonne normale
+ 
+    if "start_v" in df.columns and df["start_v"].nunique() > 1:
+        if start_v is None:
+            raise ValueError(
+                "metrics_df contient plusieurs valeurs de start_v "
+                f"({sorted(df['start_v'].unique())}) ; précise start_v=True/False."
+            )
+        df = df[df["start_v"] == start_v].drop(columns=["start_v"])
+    elif "start_v" in df.columns:
+        df = df.drop(columns=["start_v"])
+ 
+    df[n_neurons_column_name] = df["condition"].map(n_neurons)
+    if df[n_neurons_column_name].isna().any():
+        missing = df.loc[df[n_neurons_column_name].isna(), "condition"].tolist()
+        raise ValueError(f"n_neurons manquant pour les conditions : {missing}")
+ 
+    if include_columns is not None:
+        missing_cols = [c for c in include_columns if c not in df.columns]
+        if missing_cols:
+            raise KeyError(f"Colonnes demandées introuvables dans metrics_df : {missing_cols}")
+        df = df[list(include_columns)]
+ 
+    numeric_cols = df.select_dtypes(include="number").columns
+    df[numeric_cols] = df[numeric_cols].round(decimals)
+ 
+    if rename_map:
+        df = df.rename(columns=rename_map)
+ 
+    return df.reset_index(drop=True)
+ 
+def render_publication_table(
+    df: pd.DataFrame,
+    decimals: int = 2,
+    col_widths: Optional[Sequence[float]] = None,
+    fontsize: int = 10,
+    header_fontsize: Optional[int] = None,
+    font_family: str = "serif",
+    figsize: Optional[tuple] = None,
+    title: Optional[str] = None,
+):
+    """
+    Rend un DataFrame déjà propre (voir build_publication_table) sous forme d'image
+    de tableau au format "booktabs" (lignes horizontales uniquement, pas de grille
+    verticale, en-tête en gras) — style standard pour une figure de tableau en article.
+ 
+    Returns:
+        (fig, ax) matplotlib, exportable en PDF/PNG haute résolution pour publication.
+    """
+    header_fontsize = header_fontsize or fontsize
+ 
+    n_rows, n_cols = df.shape
+    if figsize is None:
+        figsize = (1.4 * n_cols, 0.5 * (n_rows + 1) + 0.5)
+ 
+    # Formatage des valeurs (arrondi déjà fait en amont par build_publication_table,
+    # mais on force ici l'affichage à `decimals` chiffres pour les colonnes numériques)
+    display_df = df.copy()
+    float_cols = display_df.select_dtypes(include="float").columns
+    int_cols = display_df.select_dtypes(include="integer").columns
+    for col in float_cols:
+        display_df[col] = display_df[col].map(lambda v: f"{v:.{decimals}f}")
+    for col in int_cols:
+        display_df[col] = display_df[col].map(lambda v: f"{v:d}")
+ 
+    with plt.rc_context({"font.family": font_family}):
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.axis("off")
+ 
+        table = ax.table(
+            cellText=display_df.values,
+            colLabels=display_df.columns,
+            cellLoc="center",
+            colLoc="center",
+            loc="center",
+        )
+        table.auto_set_font_size(False)
+        table.set_fontsize(fontsize)
+ 
+        if col_widths is not None:
+            for row_key, cell in table.get_celld().items():
+                col_idx = row_key[1]
+                cell.set_width(col_widths[col_idx])
+ 
+        # Style "booktabs" : pas de bordures verticales, lignes horizontales sélectives,
+        # en-tête en gras
+        for (row, _col), cell in table.get_celld().items():
+            cell.set_edgecolor("none")
+            cell.set_linewidth(0)
+            if row == 0:
+                cell.set_text_props(weight="bold", fontsize=header_fontsize)
+                cell.visible_edges = "TB"    # \toprule + ligne sous l'en-tête
+                cell.set_linewidth(1.0)
+                cell.set_edgecolor("black")
+            elif row == n_rows:
+                cell.visible_edges = "B"     # \bottomrule
+                cell.set_linewidth(1.0)
+                cell.set_edgecolor("black")
+            else:
+                cell.visible_edges = ""
+ 
+        table.scale(1, 1.6)
+ 
+        if title:
+            ax.set_title(title, fontsize=fontsize + 1, pad=12)
+ 
+        plt.tight_layout()
+        plt.show()
+ 
+    return fig, ax
+ 
+ 
+def export_latex_table(
+    df: pd.DataFrame,
+    decimals: int = 2,
+    caption: Optional[str] = None,
+    label: Optional[str] = None,
+) -> str:
+    """
+    Génère le code LaTeX (style booktabs) du tableau, prêt à copier dans un article.
+    Nécessite \\usepackage{booktabs} dans le document LaTeX cible.
+    """
+    fmt = {col: f"{{:.{decimals}f}}".format for col in df.select_dtypes(include="number").columns}
+    styler = df.style.format(fmt, na_rep="--").hide(axis="index")
+    return styler.to_latex(
+        hrules=True,
+        caption=caption,
+        label=label,
+        column_format="l" + "c" * (df.shape[1] - 1),
+    )
+ 

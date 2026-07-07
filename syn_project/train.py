@@ -8,8 +8,8 @@ torch.autograd.set_detect_anomaly(True)
 if __name__ == "__main__":
 
     project_name = "syn"
-    condition = "biased_50"
-    data = "biased_50"
+    condition = "alpha20"
+    data = "biased_00"
 
     modules = ['attr', 'v_latents', 'color']
     modules_to_freeze = []
@@ -18,16 +18,14 @@ if __name__ == "__main__":
     exclude_colors = True
     custom_hparams = {
         "temperature": 1,
-        "alpha": 0.5
+        "alpha": 2.0
     }
 
-    attention_weight = 0.0
+    attention_weight = 0
 
     attention_tree_config = None
 
     attention_init=None
-
-
 
     clean_names = [m.replace("_", "") for m in sorted(modules)]
     config_filename = f"{'_'.join(clean_names)}.yaml"

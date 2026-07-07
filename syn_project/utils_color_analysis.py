@@ -382,13 +382,12 @@ def hue_analysis(
     for cat in cats:
         h = hues[labels == cat]
         color = mean_rgb[cat]
-        label = f"{cat_names[cat]}  (moy. {h.mean():.0f}°)"
+        label = f"{cat_names[cat]}"
         ax.hist(h, bins=36, range=(0, 360), color=color,
                 alpha=0.6, label=label, edgecolor='none')
-        ax.axvline(h.mean(), color=color, linewidth=2, linestyle='--')
 
-    ax.set_xlabel('Teinte H (°)', fontsize=11)
-    ax.set_ylabel('Effectif', fontsize=11)
+    ax.set_xlabel('Hue (°)', fontsize=11)
+    ax.set_ylabel('Number of examples', fontsize=11)
     ax.set_xlim(0, 360)
     ax.set_xticks(range(0, 361, 60))
     ax.grid(True, linewidth=0.4, alpha=0.4)
@@ -408,24 +407,22 @@ def plot_lda(df):
     df["alpha"] = df.index.str.extract(r'a(\d+)$', expand=False).astype(int) / 10
     df = df.sort_values("alpha")
 
-    color_lda   = "#0a304a"
     color_chance = "#cc3333"
 
     xticks = np.arange(0, 2.1, 0.1)
-    col   = color_lda
     ydata = df["lda_score"]
     label = "LDA"
 
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.plot(df["alpha"], ydata,
-                linestyle="-", linewidth=2, color=col, label=label)
+                linestyle="-", linewidth=2, label=label)
 
     ax.axhline(y=0.33, color=color_chance, linewidth=1.5,
                 linestyle='--', label="Chance level (0.33)")
 
     ax.set_xlabel("α")
-    ax.set_ylabel(label, color=col)
-    ax.tick_params(axis='y', labelcolor=col)
+    ax.set_ylabel(label)
+    ax.tick_params(axis='y')
     ax.set_xticks(xticks)
     ax.set_xlim(0, 2)
     plt.xticks(rotation=45)
