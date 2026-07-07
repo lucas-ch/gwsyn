@@ -2,7 +2,7 @@ import os
 import sys
 import warnings
 from contextlib import redirect_stdout, redirect_stderr, contextmanager
-from typing import cast
+from typing import Sequence, Union, cast
 from typing import NamedTuple
 
 import pandas as pd
