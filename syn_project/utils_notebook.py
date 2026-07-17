@@ -554,7 +554,6 @@ def evaluate_condition(
     n_samples_test: int,
     split: str,
     checkpoint_epoch: int,
-    cat_names: Sequence[str],
     modality_kwargs: dict,
     compute_accuracy: bool = True,
 ) -> List[dict]:
@@ -604,7 +603,6 @@ def evaluate_condition(
         )
         metrics, _ = hue_analysis(
             colors_np, cats_np,
-            cat_names=cat_names,
             value=0.75, saturation_boost=1.8,
         )
         logistic_probe(colors_np, cats_np)  # calculé pour effet de bord / cohérence, non stocké ici
@@ -628,7 +626,6 @@ def evaluate_condition(
 def compute_metrics_table(
     conditions: Sequence[str],
     start_vision: Sequence[bool],
-    cat_names: Sequence[str],
     n_samples_test: int = 1000,
     split: str = "test",
     checkpoint_epoch: int = 0,
@@ -652,7 +649,6 @@ def compute_metrics_table(
                 n_samples_test=n_samples_test,
                 split=split,
                 checkpoint_epoch=checkpoint_epoch,
-                cat_names=cat_names,
                 modality_kwargs=modality_kwargs,
                 compute_accuracy=compute_accuracy,
             )
@@ -714,7 +710,6 @@ def plot_attention_weights(
     subplot_titles: Optional[Dict[str, str]] = None,
     colors: Union[Sequence[str], Dict[str, str]] = ("#534AB7", "#1D9E75", "#EF9F27", "#E15759", "#76B7B2"),
     figsize_per_plot: float = 3.0,
-    suptitle: Optional[str] = "Poids d'attention par condition",
 ):
     x_labels = x_labels or {}
     subplot_titles = subplot_titles or {}
@@ -736,23 +731,20 @@ def plot_attention_weights(
     for ax, (condition, weights) in zip(axes, all_weights.items()):
         values = [weights[k] for k in key_dims]
         bars = ax.bar(key_dims, values, color=bar_colors, width=0.6)
-        ax.set_title(subplot_titles.get(condition, condition), fontsize=9)
+        ax.set_title(subplot_titles.get(condition, condition), fontsize=11)
         ax.set_ylim(0, 1.15)  # marge au-dessus de 1.0 pour que les labels ne dépassent pas
         ax.set_xticks(range(len(key_dims)))
-        ax.set_xticklabels(tick_labels, rotation=30, ha="right", fontsize=8)
+        ax.set_xticklabels(tick_labels, rotation=30, ha="right", fontsize=11)
         for bar, val in zip(bars, values):
             ax.text(
                 bar.get_x() + bar.get_width() / 2, val + 0.02, f"{val:.2f}",
-                ha="center", va="bottom", fontsize=8,
+                ha="center", va="bottom", fontsize=9,
             )
  
-    axes[0].set_ylabel("proportion")
+    axes[0].set_ylabel("proportion", fontsize=11)
+    axes[0].tick_params(axis='both', labelsize=11)
  
-    if suptitle:
-        fig.suptitle(suptitle, fontsize=11)
-        fig.tight_layout(rect=[0, 0, 1, 0.93])  # réserve de la place en haut pour le suptitle
-    else:
-        fig.tight_layout()
+    fig.tight_layout()
  
     plt.show()
     return fig, axes

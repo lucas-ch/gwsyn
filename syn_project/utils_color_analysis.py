@@ -18,6 +18,7 @@ from scipy import stats
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 
 CAT_NAMES = {0:"diamond", 1:"egg", 2:"triangle"}
+CAT_NAMES_FR = {0:"diamant", 1:"oeuf", 2:"triangle"}
 
 def get_color_masks(images: torch.Tensor, s_thresh=0, v_min=0, v_max=254) -> np.ndarray:
     images_numpy = images.permute(0, 2, 3, 1).detach().cpu().numpy()
@@ -223,11 +224,9 @@ def plot_original_translated_comparison(original_images, result_images, max_imag
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(fig_w, fig_h), dpi=dpi)
 
     ax1.imshow(grid_train, interpolation='nearest')
-    ax1.set_title("Images originales", fontsize=10)
     ax1.axis('off')
 
     ax2.imshow(grid_decoded, interpolation='nearest')
-    ax2.set_title("Images traduites", fontsize=10)
     ax2.axis('off')
 
     fig.subplots_adjust(top=0.92, bottom=0.0, right=1.0, left=0.0, wspace=0.05)
@@ -353,16 +352,17 @@ def compute_hue_metrics(
 def hue_analysis(
     colors_np: np.ndarray,
     labels: np.ndarray,
-    cat_names: dict = None,
+    lang='en',
     value: float = 0.85,
     saturation_boost: float = 1.4,
-    title: str = None,
     ax=None,
 ) -> tuple[dict, plt.Figure]:
     cats = np.unique(labels)
     hues = rgb_to_hue(colors_np)
-    if cat_names is None:
-        cat_names = {c: f'Cat. {c}' for c in cats}
+
+    cat_names = CAT_NAMES
+    if lang == 'fr':
+        cat_names = CAT_NAMES_FR
 
     mean_rgb = {
         c: boost_color(
@@ -386,15 +386,21 @@ def hue_analysis(
         ax.hist(h, bins=36, range=(0, 360), color=color,
                 alpha=0.6, label=label, edgecolor='none')
 
-    ax.set_xlabel('Hue (°)', fontsize=11)
-    ax.set_ylabel('Number of examples', fontsize=11)
+    label_x = 'Hue (°)'
+    if lang =='fr':
+        label_x = 'Teinte (°)'
+
+    label_y = 'Number of examples'
+    if lang =='fr':
+        label_y = 'Nombre d\'exemples'
+
+    ax.set_xlabel(label_x, fontsize=11)
+    ax.set_ylabel(label_y, fontsize=11)
     ax.set_xlim(0, 360)
     ax.set_xticks(range(0, 361, 60))
     ax.grid(True, linewidth=0.4, alpha=0.4)
     ax.set_axisbelow(True)
-    ax.legend(fontsize=9, framealpha=0.6)
-    plot_title = title or f"LDA = {metrics['lda_score']:.1%}"
-    ax.set_title(plot_title, fontsize=11)
+    ax.legend(fontsize=11, framealpha=0.6)
 
     if standalone:
         plt.tight_layout()
@@ -407,8 +413,6 @@ def plot_lda(df):
     df["alpha"] = df.index.str.extract(r'a(\d+)$', expand=False).astype(int) / 10
     df = df.sort_values("alpha")
 
-    color_chance = "#cc3333"
-
     xticks = np.arange(0, 2.1, 0.1)
     ydata = df["lda_score"]
     label = "LDA"
@@ -417,18 +421,13 @@ def plot_lda(df):
     ax.plot(df["alpha"], ydata,
                 linestyle="-", linewidth=2, label=label)
 
-    ax.axhline(y=0.33, color=color_chance, linewidth=1.5,
-                linestyle='--', label="Chance level (0.33)")
-
-    ax.set_xlabel("α")
-    ax.set_ylabel(label)
-    ax.tick_params(axis='y')
+    ax.set_xlabel("β", fontsize=16)
+    ax.set_ylabel(label, fontsize=16)
+    ax.tick_params(axis='both', labelsize=14)
     ax.set_xticks(xticks)
     ax.set_xlim(0, 2)
     plt.xticks(rotation=45)
     ax.grid(True, alpha=0.3)
-    ax.legend(loc="best")
-    plt.title(f"{label} evolution with α")
 
     plt.tight_layout()
     plt.show()
