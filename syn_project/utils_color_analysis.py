@@ -1,28 +1,24 @@
-from matplotlib.axes import Axes
-from matplotlib.figure import Figure
 import numpy as np
 import warnings
 import cv2
 from scipy import stats
 import torch
 import numpy as np
-import pandas as pd
-import seaborn as sns
 import matplotlib.pyplot as plt
-import torch.nn.functional as F
-import os
-import glob
-from matplotlib.ticker import MultipleLocator
-from matplotlib.lines import Line2D
-import scikit_posthocs as sp
-from typing import Dict, Literal, Optional, Tuple
+from typing import Dict, Literal
 
 from torchvision.utils import make_grid
 import cv2
 import numpy as np
 
-CAT_NAMES = {0:"diamond", 1:"egg", 2:"triangle"}
+import colorsys
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy import stats
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 
+CAT_NAMES = {0:"diamond", 1:"egg", 2:"triangle"}
+CAT_NAMES_FR = {0:"diamant", 1:"oeuf", 2:"triangle"}
 
 def get_color_masks(images: torch.Tensor, s_thresh=0, v_min=0, v_max=254) -> np.ndarray:
     images_numpy = images.permute(0, 2, 3, 1).detach().cpu().numpy()
@@ -34,7 +30,6 @@ def get_color_masks(images: torch.Tensor, s_thresh=0, v_min=0, v_max=254) -> np.
         colors.append(color)
 
     return colors
-
 
 def get_color_mask(image: np.ndarray, s_thresh=50, v_min=30, v_max=225) -> np.ndarray:
     """
@@ -61,26 +56,6 @@ def get_color_mask(image: np.ndarray, s_thresh=50, v_min=30, v_max=225) -> np.nd
     color_mask = (s > s_thresh) & (v > v_min) & (v < v_max)
     
     return color_mask
-
-
-def get_color_from_attributes(data: torch.Tensor) -> torch.Tensor:
-    if data.size(dim=1) < 11:
-        raise Exception("no color in attributes") 
-    """
-    Prend un tenseur [X, 11], extrait les 3 derniers attributs (RGB)
-    et les convertit de [-1, 1] vers [0, 255].
-    """
-    # 1. Extraction des 3 dernières colonnes (indices 8, 9, 10)
-    # On utilise : pour toutes les lignes, et -3: pour les 3 dernières colonnes
-    rgb_normalized = data[:, -3:] 
-    
-    # 2. Dénormalisation de [-1, 1] -> [0, 1]
-    # .clone() évite de modifier 'data' si on fait des opérations in-place plus tard
-    rgb_01 = (rgb_normalized.clone() + 1.0) / 2.0
-    
-    # 3. Sécurité et conversion
-    rgb_01 = torch.clamp(rgb_01, 0.0, 1.0)
-    return (rgb_01 * 255).to(torch.uint8)
 
 # return r,g,b between 0 and 255 per entry in tensor
 def get_color_from_images(images: torch.Tensor, masks: np.ndarray) -> np.ndarray:
@@ -227,415 +202,39 @@ def get_color_from_image(image: np.ndarray, mask: np.ndarray, barycentre = False
             color[c] = 0.0
     return color
 
-def plot_rgb_distribution(colors_np: np.ndarray, categories_indices: np.ndarray, cat_names=CAT_NAMES, n_bins=40) -> Figure:
-    """Displays RGB distribution per category.
-
-    colors_np is an array of RGB: [[0, 0, 255], [255, 255, 0], ...]
-    categories indices is an array of categories (diamon, egg, triangle): [0, 0, 2, 1...]
-    cat_names is a dictionnary storing the names of the category indices
-    n_bins is the bins of histogram
-    """
-    unique_cats = np.unique(categories_indices)
-    n_cats = len(unique_cats)
-    channels = ['Red', 'Green', 'Blue']
-    colors_palette = ['#e74c3c', '#2ecc71', '#3498db']     
-
-    fig, axes = plt.subplots(3, n_cats, figsize=(n_cats * 2.5, 6), sharex=True, sharey=False)
-    
-    if n_cats == 1:
-        axes = axes.reshape(3, 1)
-
-    for col, cat in enumerate(unique_cats):
-        mask = (categories_indices == cat)
-        cat_data = colors_np[mask]
-        
-        name = cat_names.get(cat, f"CAT {cat}") if cat_names else f"CAT {cat}"
-        
-        for row in range(3):
-            ax = axes[row, col]
-            
-            sns.histplot(
-                cat_data[:, row], 
-                bins=n_bins, 
-                kde=True, 
-                ax=ax, 
-                color=colors_palette[row],
-                element="step",
-                alpha=0.6
-            )
-            
-            ax.set_xlim(0, 255)
-            ax.tick_params(axis='both', which='major', labelsize=8) # Petites polices
-            
-            if row == 0:
-                ax.set_title(name.upper(), fontweight='bold', fontsize=10, pad=10)
-            
-            if col == 0:
-                ax.set_ylabel(channels[row], fontweight='bold', fontsize=9)
-            else:
-                ax.set_ylabel("")
-                ax.set_yticklabels([])
-            
-            if row == 2:
-                ax.set_xlabel("")
-            else:
-                ax.set_xlabel("")
-
-            # Clean design
-            for spine in ["top", "right"]:
-                ax.spines[spine].set_visible(False)
-
-    plt.tight_layout(pad=1.0)
-    return fig
-
-def categorize_decoded_attr(decoded_attr: torch.Tensor) -> torch.Tensor:
-    """Get the category from a result of GW decoded attributes tensor.
-
-    The tensor contains category in the first 3 columns [-1.2, -2.4, 12.5]
-    categorize_decoded_attr returns corresponding one hot encoding [0, 0, 1]
-    """
-    first_three = decoded_attr[:, :3]
-    
-    indices = torch.argmax(first_three, dim=1)
-    binary_categories = F.one_hot(indices, num_classes=3)
-    
-    return binary_categories.to(torch.float32)
-
-def get_attr_classification_stats(y_true:np.ndarray, y_pred: np.ndarray) -> tuple[int, np.ndarray]:
-    correct_mask = (y_true == y_pred)
-    accuracy_pct = np.mean(correct_mask) * 100
-    incorrect_indices = np.where(~correct_mask)[0]
-    
-    return accuracy_pct, incorrect_indices
-
-def load_epoch_files(data_dir: str) -> list[str]:
-    files = sorted(glob.glob(os.path.join(data_dir, "stats_epoch_*.npz")))
-    return files
-
-def get_color_data_from_epoch(file: str) -> tuple[int, np.ndarray, np.ndarray]:
-    """Extract info from stats_epoch_*.npz file
-    epoch: the training epoch from which the data is extracted
-    colors: list of RGB of the samples: [[0, 0, 255], [12, 12, 12], ...]
-    categories: list of catgories of the samples: [0, 2, 1, 0...]
-    """
-
-    data = np.load(file)
-    epoch = int(os.path.basename(file).split('_')[-1].replace('.npz', ''))
-    colors = data["colors_from_decoded_img"]
-    categories_raw = data["categories_from_data_attr"]
-    categories = np.argmax(categories_raw, axis=1) if categories_raw.ndim > 1 else categories_raw    
-
-    return epoch, colors, categories
-
-def get_color_data_from_epoch_files(files: list[str]) -> tuple[list[int], dict]:
-    """Extract info from stats_epoch_*.npz files
-    epochs: list of epochs
-    history: for each category, each color, the list of value {0: {'R': [255, 12, 122...], {'G': [...]}, {'B': [...]}, 1: {...}, 2:{...}}
-    """
-    epochs = []
-    history = {}
-        
-    for f in files:
-        epoch, colors, cats = get_color_data_from_epoch(f)
-        
-        epochs.append(epoch)
-        for cat in np.unique(cats):
-            if cat not in history:
-                history[cat] = {'R': [], 'G': [], 'B': []}
-            
-            cat_mask = (cats == cat)
-            mean_rgb = colors[cat_mask].mean(axis=0)
-            
-            history[cat]['R'].append(mean_rgb[0])
-            history[cat]['G'].append(mean_rgb[1])
-            history[cat]['B'].append(mean_rgb[2])
-    
-    return epochs, history
-
-def plot_color_history(
-    ax: Axes, 
-    epochs: list[int], 
-    cat_id: int, 
-    channels: dict[str, np.ndarray], 
-    cat_names: Optional[dict[int, str]], 
-    vline_epoch: Optional[int]
-) -> Axes:
-    """
-    Trace l'évolution temporelle des intensités moyennes R, G, B pour une catégorie spécifique.
-
-    Args:
-        ax: L'objet Axes de matplotlib sur lequel tracer le graphique.
-        epochs: Liste ou tableau des indices d'époques (axe X).
-        cat_id: Identifiant numérique de la catégorie à tracer.
-        channels: Dictionnaire contenant les vecteurs d'intensité {'R': [...], 'G': [...], 'B': [...]}.
-        cat_names: Dictionnaire optionnel de correspondance {id: "Nom"}.
-        vline_epoch: Époque optionnelle où tracer une ligne verticale (ex: switch d'architecture).
-
-    Returns:
-        L'objet Axes configuré et complété.
-    """
-    
-    colors_palette = ['#e74c3c', '#2ecc71', '#3498db']
-
-    name = cat_names.get(cat_id, f"Catégorie {cat_id}") if cat_names else f"Catégorie {cat_id}"
-        
-    ax.plot(epochs, channels['R'], color=colors_palette[0], label='Red', linewidth=2)
-    ax.plot(epochs, channels['G'], color=colors_palette[1], label='Green', linewidth=2)
-    ax.plot(epochs, channels['B'], color=colors_palette[2], label='Blue', linewidth=2)
-        
-    if vline_epoch is not None:
-        ax.axvline(x=vline_epoch, color='black', linestyle='--', linewidth=1.5, alpha=0.8, 
-                   label=f'Switch @ {vline_epoch}')
-        
-    ax.set_title(f"Color evolution : {name.upper()}", fontweight='bold')
-    ax.set_ylabel("Average intensity (0-255)")
-    ax.grid(True, linestyle='--', alpha=0.4)
-    
-    ax.set_ylim(0, 255)
-    ax.legend(loc='upper right', fontsize='small')
-
-    ax.xaxis.set_major_locator(MultipleLocator(50))
-
-    return ax
-
-def plot_color_evolution_per_category(
-    data_dir: str, 
-    cat_names: dict[int, str] = CAT_NAMES, 
-    vline_epoch: Optional[int] = None
-) -> Figure:
-    files: list[str] = load_epoch_files(data_dir)
-    epochs, history = get_color_data_from_epoch_files(files)
-
-    n_cats: int = len(history)
-    fig, axes = plt.subplots(n_cats, 1, figsize=(10, 3 * n_cats), sharex=True)
-    
-    if n_cats == 1: 
-        axes = [axes]
-
-    for i, (cat_id, channels) in enumerate(sorted(history.items())):
-        ax = axes[i]
-        plot_color_history(ax, epochs, cat_id, channels, cat_names, vline_epoch)
-
-    axes[-1].set_xlabel("Epoch", fontweight='bold')
-    
-    plt.tight_layout()
-    return fig
-
-def plot_statistical_dominance_evolution(
-    results_dict: dict[str, list[dict[str, any]]], 
-    cat_names: Optional[dict[int, str]] = None, 
-    vline_epoch: Optional[int] = None
-) -> Figure:
-    
-    df_k = pd.DataFrame(results_dict["kruskal"]).rename(columns={'f_stat': 'h_stat'})
-    df_d = pd.DataFrame(results_dict["dunn"])
-    df = pd.merge(df_k, df_d, on=['epoch', 'category']).sort_values(['category', 'epoch'])
-    
-    # --- CALCUL DE L'ÉCHELLE COMMUNE ---
-    # On trouve le max global pour fixer la limite Y identique sur tous les graphes
-    y_max_global = df['h_stat'].max() * 1.15  # +15% de marge pour la lisibilité
-    # ------------------------------------
-    
-    unique_cats = sorted(df['category'].unique())
-    n_cats = len(unique_cats)
-    
-    color_map = {'R': '#e74c3c', 'G': '#2ecc71', 'B': '#3498db', 'None': '#95a5a6'}
-
-    # On peut aussi ajouter sharey=True ici, mais le réglage manuel ci-dessous est plus précis
-    fig, axes = plt.subplots(n_cats, 1, figsize=(10, 3 * n_cats), sharex=True)
-    if n_cats == 1: axes = [axes]
-
-    for i, cat in enumerate(unique_cats):
-        ax = axes[i]
-        cat_data = df[df['category'] == cat]
-        cat_label = cat_names.get(cat, f"Category {cat}") if cat_names else f"Category {cat}"
-        
-        ax.plot(cat_data['epoch'], cat_data['h_stat'], 
-                color='black', alpha=0.15, linewidth=1, zorder=1)
-        
-        point_colors = [color_map.get(row['dominant_color'], '#95a5a6') 
-                        if row['is_dominant'] else '#95a5a6' 
-                        for _, row in cat_data.iterrows()]
-        
-        ax.scatter(cat_data['epoch'], cat_data['h_stat'], 
-                   c=point_colors, s=8, edgecolors='none', zorder=2)
-
-        # --- APPLICATION DE L'ÉCHELLE COMMUNE ---
-        ax.set_ylim(0, y_max_global)
-        # ----------------------------------------
-
-        ax.set_title(f"Statistical bias (H-Stat) : {cat_label.upper()}", fontweight='bold', loc='left')
-        ax.set_ylabel("Bias intensity")
-        ax.grid(True, linestyle=':', alpha=0.4)
-        
-        if vline_epoch is not None:
-            ax.axvline(x=vline_epoch, color='black', linestyle='--', alpha=0.6)
-
-    axes[-1].set_xlabel("Epoch", fontweight='bold')
-    axes[-1].xaxis.set_major_locator(MultipleLocator(50))
-    
-    legend_elements = [
-        Line2D([0], [0], color='#e74c3c', lw=0, marker='o', label='Dominant color: red'),
-        Line2D([0], [0], color='#2ecc71', lw=0, marker='o', label='Dominant color: green'),
-        Line2D([0], [0], color='#3498db', lw=0, marker='o', label='Dominant color: blue'),
-        Line2D([0], [0], color='#95a5a6', lw=0, marker='o', label='No dominant color')
-    ]
-    fig.legend(handles=legend_elements, loc='upper center', ncol=4, bbox_to_anchor=(0.5, 0.98), frameon=False)
-
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-    return fig
-
-def kruskal_colors(
-    colors: np.ndarray, 
-    category_to_analyze: int, 
-    categories: np.ndarray
-) -> stats._stats_py.KruskalResult:
-    """
-    Performs a Kruskal-Wallis H-test as a non-parametric alternative to ANOVA, 
-    testing if the median distributions of R, G, and B channels differ.
-
-    Parameters:
-        colors: Array of RGB values of the samples (N, 3).
-        category: The specific category ID to analyze.
-        categories: Array of category labels for the samples (N,).
-    """
-    cat_colors = colors[categories == category_to_analyze]
-    
-    r = cat_colors[:, 0]
-    g = cat_colors[:, 1]
-    b = cat_colors[:, 2]
-    
-    return stats.kruskal(r, g, b)
-
-def dunn_colors(
-    colors: np.ndarray, 
-    cat: int, 
-    cats: np.ndarray
-) -> Tuple[str, bool, pd.DataFrame]:
-    """
-    Performs a Dunn post-hoc test with Bonferroni correction to identify if 
-    one specific color channel statistically dominates the others.
-    """ 
-    cat_colors = colors[cats == cat]
-    if len(cat_colors) < 5:
-        return "Insuffisant", False
-
-    data = [cat_colors[:, 0], cat_colors[:, 1], cat_colors[:, 2]]
-    
-    p_matrix = sp.posthoc_dunn(data, p_adjust='bonferroni')
-    p_matrix.columns = ['R', 'G', 'B']
-    p_matrix.index = ['R', 'G', 'B']
-
-    means = np.mean(cat_colors, axis=0)
-    channels = ['R', 'G', 'B']
-    dom_idx = np.argmax(means)
-    dom_name = channels[dom_idx]
-
-    others = [c for c in channels if c != dom_name]
-    is_dominant = all(p_matrix.loc[dom_name, other] < 0.05 for other in others)
-
-    return dom_name, is_dominant, p_matrix
-
-def color_statisitical_dominance_analysis(
-    data_dir: str
-) -> dict[str, list[dict[str, any]]]:
-    """
-    Iterates through epoch files to perform Kruskal-Wallis and Dunn post-hoc tests 
-    for every category. Aggregates statistical metrics and dominance data into 
-    a structured dictionary for downstream visualization.
-
-    Parameters:
-        data_dir: Path to the directory containing the .npz epoch files.
-
-    Returns:
-        A dictionary with two keys:
-            - "kruskal": List of records containing H-stats and p-values.
-            - "dunn": List of records containing dominant color names and p-matrices.
-    """
-    files = load_epoch_files(data_dir)
-    kruskal = []
-    dunn = []
-    
-    for f in files:
-        epoch, colors, cats = get_color_data_from_epoch(f)
-        
-        for cat in np.unique(cats):
-            h_stat, p_val = kruskal_colors(colors, cat, cats)
-            dom_name, is_dominant, p_matrix = dunn_colors(colors, cat, cats)
-
-            dunn.append({
-                "epoch": epoch,
-                "category": cat,
-                "dominant_color": dom_name,
-                "is_dominant": is_dominant,
-                "p_matrix": p_matrix}
-                )
-            
-            kruskal.append({
-                "epoch": epoch,
-                "category": cat,
-                "h_stat": h_stat,
-                "p_val": p_val,
-                "significant": p_val < 0.05
-            })
-
-    return {
-        "kruskal": kruskal,
-        "dunn": dunn
-    }
-
-def get_top_img_per_category(results, n = 10):
-    attr = results["attr_decoded"]
-    categories = torch.argmax(attr[:, :3], dim=1)
-
-    selected_orig = []
-    selected_decoded = []
-
-    for cat in range(3):
-        indices = (categories == cat).nonzero(as_tuple=True)[0]
-
-        top_indices = indices[:n].to('cpu')
-
-        selected_orig.append(results["train_images"][top_indices])
-        selected_decoded.append(results["images_decoded"][top_indices])
-
-    final_orig = torch.cat(selected_orig, dim=0)
-    final_decoded = torch.cat(selected_decoded, dim=0)
-
-    return final_orig, final_decoded
-
 def get_grid_numpy(samples, nrow=10):
     grid = make_grid(samples, nrow=nrow, pad_value=1).permute(1, 2, 0)
     return grid.detach().cpu().numpy()
 
-def plot_original_translated_comparison(original_images, result_images, max_images=30):
+
+def plot_original_translated_comparison(original_images, result_images, max_images=30, nrow=10):
     num_to_show = min(len(original_images), max_images)
     orig_subset = original_images[:num_to_show]
-    res_subset = result_images[:num_to_show]    
-    
-    grid_train = get_grid_numpy(orig_subset)
-    grid_decoded = get_grid_numpy(res_subset)
+    res_subset  = result_images[:num_to_show]
 
-    # 1. On retire "constrained_layout" pour éviter le conflit
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4)) 
+    grid_train   = get_grid_numpy(orig_subset, nrow=nrow)
+    grid_decoded = get_grid_numpy(res_subset,  nrow=nrow)
 
-    ax1.imshow(grid_train)
-    ax1.set_title("Images originales")
+    # Taille de figure basée sur les dimensions réelles des grilles en pixels
+    dpi          = 100
+    grid_h, grid_w = grid_train.shape[:2]
+    fig_w        = (grid_w * 2) / dpi        # 2 grilles côte à côte
+    fig_h        = (grid_h + 30) / dpi       # +30px pour le titre
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(fig_w, fig_h), dpi=dpi)
+
+    ax1.imshow(grid_train, interpolation='nearest')
     ax1.axis('off')
 
-    ax2.imshow(grid_decoded)
-    ax2.set_title("Images traduites")
+    ax2.imshow(grid_decoded, interpolation='nearest')
     ax2.axis('off')
 
-    # 2. On ajuste manuellement : top/bottom gèrent les espaces blancs verticaux
-    # wspace gère l'espace entre les deux colonnes
-    fig.subplots_adjust(top=0.95, bottom=0.05, right=0.98, left=0.02, wspace=0.05)
-
+    fig.subplots_adjust(top=0.92, bottom=0.0, right=1.0, left=0.0, wspace=0.05)
     return fig
 
 def get_samples_rgb(
     data_translated: Dict[str, any], 
-    type: Literal['training', 'decoded', 'decoded_edge'] = 'training'
+    type: Literal['training', 'decoded', 'decoded_edge'] = 'decoded_edge'
 ) -> np.ndarray:
     """
     Extracts and aggregates color information from different image sources within the dataset.
@@ -650,22 +249,18 @@ def get_samples_rgb(
     Returns:
         A vertically stacked NumPy array of all detected pixel colors.
     """
-    # Generate binary masks for shape localization
-    masks = get_mask_from_shapes(data_translated["train_images"])
-    masks_decoded = get_mask_from_shapes(data_translated["images_decoded"])
+    if type == 'training':
+        masks = get_mask_from_shapes(data_translated["train_images"])
+        colors_from_training_img = get_color_from_images(data_translated["train_images"], masks)
+        colors_np = np.vstack(colors_from_training_img)
+        return colors_np
 
-    # Generate a specific mask for colorful pixels (excluding grayscale background/noise)
+    masks_decoded = get_mask_from_shapes(data_translated["images_decoded"])
     colors_masks = get_color_masks(data_translated["images_decoded"], 0, 0, 254)
 
-    # Extract pixel values (RGB) located within the defined masks
-    colors_from_training_img = get_color_from_images(data_translated["train_images"], masks)
     colors_from_decoded_img = get_color_from_images(data_translated["images_decoded"], masks_decoded)
     colors_from_decoded_img_edge = get_color_from_images(data_translated["images_decoded"], colors_masks)
 
-    # Default selection: Original training colors
-    colors_np = np.vstack(colors_from_training_img)
-    
-    # Switch output based on the 'type' argument
     if type == "decoded":
         colors_np = np.vstack(colors_from_decoded_img)
     elif type == "decoded_edge":
@@ -673,21 +268,166 @@ def get_samples_rgb(
 
     return colors_np
 
-def get_categories_indices(data_translated: dict[str, torch.Tensor], attr_type = 'attr_decoded') -> np.ndarray:
-    """
-    Converts raw decoded attributes into discrete category indices.
-    
-    Args:
-        data_translated: Dictionary containing 'attr_decoded' and/or 'train_attr'(tensors of attributes with categories one-hot coded).
-        
-    Returns:
-        A NumPy array of integers representing the class index for each sample.
-    """
+def rgb_to_hue(rgb_array: np.ndarray) -> np.ndarray:
+    """Array (n, 3) RGB 0-255  →  array (n,) teinte H en degrés 0-360."""
+    return np.array([
+        colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)[0] * 360
+        for r, g, b in rgb_array
+    ])
 
-    # Convert raw attributes (logits) into categorized form (likely via softmax internally)
-    categories_from_decoded_attr = categorize_decoded_attr(data_translated[attr_type])
-    
-    # Retrieve the index of the highest probability (Argmax) and move to CPU/NumPy for analysis
-    categories_indices = categories_from_decoded_attr.argmax(dim=1).detach().cpu().numpy()
+def circular_mean_deg(angles_deg: np.ndarray) -> float:
+    """Moyenne circulaire en degrés."""
+    rad = np.deg2rad(angles_deg)
+    return float(np.rad2deg(np.arctan2(np.sin(rad).mean(), np.cos(rad).mean())) % 360)
 
-    return categories_indices
+def circular_std_deg(angles_deg: np.ndarray) -> float:
+    """Écart-type circulaire en degrés (Mardia & Jupp)."""
+    rad = np.deg2rad(angles_deg)
+    R   = np.sqrt(np.sin(rad).mean() ** 2 + np.cos(rad).mean() ** 2)
+    return float(np.rad2deg(np.sqrt(-2 * np.log(R))))
+
+def hue_to_sin_cos(hues_deg: np.ndarray) -> np.ndarray:
+    """Encode la teinte en (sin, cos) pour respecter la circularité."""
+    rad = np.deg2rad(hues_deg)
+    return np.stack([np.sin(rad), np.cos(rad)], axis=1)
+
+def boost_color(rgb_0_1: np.ndarray, value: float, saturation_boost: float):
+    """Force la luminosité V et booste la saturation en conservant la teinte."""
+    h, s, v = colorsys.rgb_to_hsv(*rgb_0_1)
+    s = min(1.0, s * saturation_boost)
+    return colorsys.hsv_to_rgb(h, s, value)
+
+
+def compute_hue_metrics(
+    colors_np: np.ndarray,
+    labels: np.ndarray,
+    cat_names: dict | None = None,
+) -> dict:
+    """
+    Calcule les métriques circulaires sur les teintes.
+ 
+    Returns
+    -------
+    dict avec les clés :
+        kruskal_H, kruskal_p, lda_score,
+        per_cat : {cat_id: {'mean_hue', 'std_hue', 'name'}}
+    """
+    cats  = np.unique(labels)
+    hues  = rgb_to_hue(colors_np)
+    if cat_names is None:
+        cat_names = {c: f'Cat. {c}' for c in cats}
+ 
+    # LDA sur (sin H, cos H)
+    X         = hue_to_sin_cos(hues)
+    lda_score = LinearDiscriminantAnalysis().fit(X, labels).score(X, labels)
+ 
+    # Kruskal-Wallis sur teintes "dépliées" autour de la moyenne globale
+    global_mean = circular_mean_deg(hues)
+ 
+    def wrap_around_mean(h: np.ndarray, ref: float) -> np.ndarray:
+        return (h - ref + 180) % 360 - 180
+ 
+    groups_wrapped       = [wrap_around_mean(hues[labels == c], global_mean) for c in cats]
+    H_stat, p_kruskal    = stats.kruskal(*groups_wrapped)
+ 
+    per_cat = {
+        c: {
+            'name':     cat_names.get(c, f'Cat. {c}'),
+            'mean_hue': circular_mean_deg(hues[labels == c]),
+            'std_hue':  circular_std_deg(hues[labels == c]),
+        }
+        for c in cats
+    }
+ 
+    return {
+        'kruskal_H': H_stat,
+        'kruskal_p': p_kruskal,
+        'lda_score': lda_score,
+        'per_cat':   per_cat,
+        'hues':      hues,          # conservé pour la visualisation
+        'labels':    labels,
+    }
+
+
+def hue_analysis(
+    colors_np: np.ndarray,
+    labels: np.ndarray,
+    lang='en',
+    value: float = 0.85,
+    saturation_boost: float = 1.4,
+    ax=None,
+) -> tuple[dict, plt.Figure]:
+    cats = np.unique(labels)
+    hues = rgb_to_hue(colors_np)
+
+    cat_names = CAT_NAMES
+    if lang == 'fr':
+        cat_names = CAT_NAMES_FR
+
+    mean_rgb = {
+        c: boost_color(
+            colors_np[labels == c].mean(axis=0) / 255,
+            value=value,
+            saturation_boost=saturation_boost,
+        )
+        for c in cats
+    }
+
+    metrics = compute_hue_metrics(colors_np, labels)
+
+    standalone = ax is None
+    if standalone:
+        fig, ax = plt.subplots(figsize=(7, 4))
+
+    for cat in cats:
+        h = hues[labels == cat]
+        color = mean_rgb[cat]
+        label = f"{cat_names[cat]}"
+        ax.hist(h, bins=36, range=(0, 360), color=color,
+                alpha=0.6, label=label, edgecolor='none')
+
+    label_x = 'Hue (°)'
+    if lang =='fr':
+        label_x = 'Teinte (°)'
+
+    label_y = 'Number of examples'
+    if lang =='fr':
+        label_y = 'Nombre d\'exemples'
+
+    ax.set_xlabel(label_x, fontsize=11)
+    ax.set_ylabel(label_y, fontsize=11)
+    ax.set_xlim(0, 360)
+    ax.set_xticks(range(0, 361, 60))
+    ax.grid(True, linewidth=0.4, alpha=0.4)
+    ax.set_axisbelow(True)
+    ax.legend(fontsize=11, framealpha=0.6)
+
+    if standalone:
+        plt.tight_layout()
+        plt.close(fig)  # empêche l'affichage automatique dans Jupyter
+
+    return metrics, fig
+
+def plot_lda(df):
+    df = df.copy()
+    df["alpha"] = df.index.str.extract(r'a(\d+)$', expand=False).astype(int) / 10
+    df = df.sort_values("alpha")
+
+    xticks = np.arange(0, 2.1, 0.1)
+    ydata = df["lda_score"]
+    label = "LDA"
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(df["alpha"], ydata,
+                linestyle="-", linewidth=2, label=label)
+
+    ax.set_xlabel("β", fontsize=16)
+    ax.set_ylabel(label, fontsize=16)
+    ax.tick_params(axis='both', labelsize=14)
+    ax.set_xticks(xticks)
+    ax.set_xlim(0, 2)
+    plt.xticks(rotation=45)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()

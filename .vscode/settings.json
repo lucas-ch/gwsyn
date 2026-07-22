@@ -6,5 +6,12 @@
     "python.testing.pytestEnabled": true,
     "git.ignoreLimitWarning": true,
     "python-envs.defaultEnvManager": "ms-python.python:poetry",
-    "python-envs.defaultPackageManager": "ms-python.python:poetry"
+    "python-envs.defaultPackageManager": "ms-python.python:poetry",
+    "python-envs.pythonProjects": [
+        {
+            "path": "checkpoints/syn/debug_l_biased_00/checkpoints",
+            "envManager": "ms-python.python:poetry",
+            "packageManager": "ms-python.python:poetry"
+        }
+    ]
 }

@@ -12,7 +12,6 @@ wandb:
     save_dir: "./wandb"
     project: "Shimmer-SSD"
     entity: "lexman-psl"
-    api_key: 8761f3bd1d5f630c1b284da5ced0b1e371a4ceb1
 
 
 # Uncomment the following to use mixed-precision for training:
@@ -25,16 +24,6 @@ wandb:
 domain_data_args:
     v_latents:
         presaved_path: domain_v.npy
-
-
-# Proportion used for each group of domain
-domain_proportions: 
-    -   domains: ["attr"]
-        proportion: 1.0
-    -   domains: ["v"]
-        proportion: 1.0
-    -   domains: ["v", "attr"]
-        proportion: 1.0
 
 
 

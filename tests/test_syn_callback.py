@@ -8,13 +8,8 @@ def test_callback():
     project_name = "test"
     condition = "control"
     data = "test1"
-    switch_epoch = 0
 
-    experiment_name = get_experiment_name(condition, data, switch_epoch)
-    experiment_name = f"{condition}_{data}"
-
-    if switch_epoch > 0:
-        experiment_name = f"{experiment_name}_switch_{switch_epoch}"
+    experiment_name = condition
     
     config.dataset.path = f"{ROOT_PATH}/simple_shapes_dataset_{data}"
     exclude_colors = False if condition == "control" else True
@@ -36,5 +31,4 @@ def test_callback():
         apply_custom_init=apply_custom_init,
         exclude_colors=exclude_colors,
         load_from_checkpoint=False,
-        switch_epoch=switch_epoch
     )

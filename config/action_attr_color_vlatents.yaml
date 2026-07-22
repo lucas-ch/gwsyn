@@ -1,5 +1,5 @@
 global_workspace:
-    latent_dim: 12  
+    latent_dim: 12
 
     loss_coefficients:
         cycles: 1
@@ -7,13 +7,26 @@ global_workspace:
         demi_cycles: 1
         translations: 1
     encoders:
-        hidden_dim: 256
+        hidden_dim:
+            attr: 256
+            attr_legacy_no_color: 256
+            v_latents: 256
+            color: 256
+            cat: 256
+            position: 256
+            action: 16
         n_layers: 2
 
     decoders:
-        hidden_dim: 256
+        hidden_dim:
+            attr: 256
+            attr_legacy_no_color: 256
+            v_latents: 256
+            color: 256
+            cat: 256
+            position: 256
+            action: 16
         n_layers: 2
-
 
 training:
     optim:
@@ -30,7 +43,7 @@ training:
 
 logging:
     log_val_medias_every_n_epochs: 1
-    log_train_medias_every_n_epochs: 5
+    log_train_medias_every_n_epochs: 1
     filter_images:
         - pred_trans_attr_to_attr
         - pred_trans_v_latents_to_v_latents
@@ -43,17 +56,32 @@ logging:
 
 
 domains:
-    - checkpoint_path: "#{default_root_dir}/checkpoints/pretrained/domain_attr.ckpt"
-      domain_type: attr
-      args:
-          n_unpaired: "#{domain_data_args.attr.n_unpaired}"
     - checkpoint_path: "#{default_root_dir}/pretrained/domain_v.ckpt"
       domain_type: v_latents
+    - checkpoint_path: "#{default_root_dir}/checkpoints/pretrained/domain_attr.ckpt"
+      domain_type: color
 
 domain_data_args:
     v_latents:
         presaved_path: vae_v_shimmer.npy
     attr:
         n_unpaired: 0
+
+# Proportion used for each group of domain
+domain_proportions:
+    -   domains: ["v"]
+        proportion: 1.0
+
+    -   domains: ["color"]
+        proportion: 1.0
+
+    -   domains: ["attr"]
+        proportion: 1.0
+
+    -   domains: ["action"]
+        proportion: 1.0
+
+    -   domains: ["v", "color", "attr", "action"]
+        proportion: 1.0
 
 output_dir: "./base_params"

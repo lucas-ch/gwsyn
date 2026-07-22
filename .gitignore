@@ -6,3 +6,6 @@ evaluation_set_examples/
 notebooks/best_model.h5
 __pycache__/
 archive
+images
+mnist
+notebooks/figure
